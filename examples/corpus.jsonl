@@ -1,0 +1,8 @@
+{"id": "paris", "text": "The capital of France is Paris. It sits on the banks of the Seine river in the north of the country.", "metadata": {"topic": "geography"}}
+{"id": "eiffel", "text": "The Eiffel Tower is a wrought-iron lattice tower in Paris, France. It was completed in 1889 for the World's Fair.", "metadata": {"topic": "landmark"}}
+{"id": "seine", "text": "The Seine is a major river of northern France. It flows through Paris before reaching the English Channel.", "metadata": {"topic": "geography"}}
+{"id": "python", "text": "Python is a high-level programming language. It is widely used for data science, scripting, and web development.", "metadata": {"topic": "tech"}}
+{"id": "numpy", "text": "NumPy is a Python library for numerical computing. It provides fast multi-dimensional array operations.", "metadata": {"topic": "tech"}}
+{"id": "banana", "text": "Bananas are an elongated edible fruit. They are rich in potassium and grow in tropical climates.", "metadata": {"topic": "food"}}
+{"id": "photosynthesis", "text": "Photosynthesis converts light energy into chemical energy. Plants use chlorophyll to absorb sunlight and release oxygen.", "metadata": {"topic": "biology"}}
+{"id": "mitochondria", "text": "The mitochondria are the powerhouse of the cell. They produce ATP, the energy currency that drives cellular metabolism.", "metadata": {"topic": "biology"}}
