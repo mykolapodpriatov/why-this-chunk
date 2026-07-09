@@ -2,7 +2,7 @@
 
 > Retrieval explainer for RAG — shows why a chunk ranked where it did, the lexical-vs-dense split, and the one config change that would have surfaced the right answer.
 
-![status](https://img.shields.io/badge/status-beta-blue) ![language](https://img.shields.io/badge/language-Python-blue) ![python](https://img.shields.io/badge/python-3.11%2B-blue) ![license](https://img.shields.io/badge/license-MIT-green)
+![status](https://img.shields.io/badge/status-beta-blue) ![python](https://img.shields.io/badge/python-3.11%2B-blue) ![license](https://img.shields.io/badge/license-MIT-green)
 
 Point it at a query and an existing retriever/index; it produces per-result explanations: sentence-level (or token-level) attribution of the similarity score and a lexical (BM25) vs dense contribution split for hybrid search. When a known-correct chunk is missing, it classifies *why* and finds the smallest config change that fixes that one query.
 
