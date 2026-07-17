@@ -61,7 +61,7 @@ why-this-chunk fix "NumPy fast numerical arrays for Python data science" \
     --expect python --corpus examples/corpus.jsonl --k 1 --all
 ```
 
-Add `--format md` for Markdown or `--json` for machine-readable output. Pick the retriever with `--mode {bm25,dense,hybrid}` (default `hybrid`). All CLI commands run offline using the deterministic `FakeEmbedder`.
+Every command takes `--format {rich,md,json}` (default `rich`) to choose the output shape; `--json` is kept as a deprecated alias for `--format json`. Pick the retriever with `--mode {bm25,dense,hybrid}` (default `hybrid`). All CLI commands run offline using the deterministic `FakeEmbedder`.
 
 ### Library
 

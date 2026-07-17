@@ -37,6 +37,7 @@ def test_explain_rich_output(corpus_file: Path) -> None:
 
 
 def test_explain_json_schema(corpus_file: Path) -> None:
+    # The hidden --json alias must keep working for back-compat.
     result = runner.invoke(
         app,
         ["explain", "capital of France Paris", "--corpus", str(corpus_file), "--k", "2", "--json"],
@@ -48,6 +49,35 @@ def test_explain_json_schema(corpus_file: Path) -> None:
     first = payload["explanations"][0]
     assert {"query", "granularity", "degenerate", "result", "split", "sentences"} <= first.keys()
     assert {"chunk_id", "score", "rank"} <= first["result"].keys()
+
+
+def test_explain_format_json(corpus_file: Path) -> None:
+    result = runner.invoke(
+        app,
+        [
+            "explain",
+            "capital of France Paris",
+            "--corpus",
+            str(corpus_file),
+            "--k",
+            "2",
+            "--format",
+            "json",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert payload["query"] == "capital of France Paris"
+    assert isinstance(payload["explanations"], list)
+
+
+def test_explain_json_alias_matches_format_json(corpus_file: Path) -> None:
+    args = ["explain", "Paris France", "--corpus", str(corpus_file), "--k", "2"]
+    alias = runner.invoke(app, [*args, "--json"])
+    explicit = runner.invoke(app, [*args, "--format", "json"])
+    assert alias.exit_code == 0, alias.output
+    assert explicit.exit_code == 0, explicit.output
+    assert json.loads(alias.output) == json.loads(explicit.output)
 
 
 def test_explain_markdown(corpus_file: Path) -> None:
@@ -83,7 +113,17 @@ def test_explain_bad_granularity(corpus_file: Path) -> None:
         app,
         ["explain", "Paris", "--corpus", str(corpus_file), "--granularity", "phrase"],
     )
+    # Typer validates the enum itself and exits 2, listing the valid choices.
     assert result.exit_code == 2
+    assert "sentence" in result.output
+    assert "token" in result.output
+
+
+def test_granularity_choices_in_help() -> None:
+    result = runner.invoke(app, ["explain", "--help"])
+    assert result.exit_code == 0
+    assert "sentence" in result.output
+    assert "token" in result.output
 
 
 def test_explain_missing_corpus() -> None:
@@ -114,6 +154,27 @@ def test_diagnose_json(corpus_file: Path) -> None:
             "--k",
             "1",
             "--json",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert {"failure_class", "unevaluable", "evidence", "fix"} <= payload.keys()
+
+
+def test_diagnose_format_json(corpus_file: Path) -> None:
+    result = runner.invoke(
+        app,
+        [
+            "diagnose",
+            "Paris France",
+            "--expect",
+            "seine",
+            "--corpus",
+            str(corpus_file),
+            "--k",
+            "1",
+            "--format",
+            "json",
         ],
     )
     assert result.exit_code == 0, result.output
@@ -163,6 +224,43 @@ def test_fix_json(corpus_file: Path) -> None:
     assert result.exit_code == 0, result.output
     payload = json.loads(result.output)
     assert {"best", "all_fixes", "unevaluable"} <= payload.keys()
+
+
+def test_fix_format_json(corpus_file: Path) -> None:
+    result = runner.invoke(
+        app,
+        [
+            "fix",
+            "Paris France",
+            "--expect",
+            "seine",
+            "--corpus",
+            str(corpus_file),
+            "--format",
+            "json",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert {"best", "all_fixes", "unevaluable"} <= payload.keys()
+
+
+def test_fix_markdown(corpus_file: Path) -> None:
+    result = runner.invoke(
+        app,
+        [
+            "fix",
+            "Paris France",
+            "--expect",
+            "seine",
+            "--corpus",
+            str(corpus_file),
+            "--format",
+            "md",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    assert "## fix" in result.output
 
 
 def test_fix_all_flag(corpus_file: Path) -> None:

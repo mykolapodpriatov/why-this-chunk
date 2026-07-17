@@ -18,6 +18,7 @@ from typing import Any
 from rich.console import Console
 from rich.table import Table
 
+from why_this_chunk.counterfactual import CounterfactualResult
 from why_this_chunk.types import (
     ContributionSplit,
     DiagnosisResult,
@@ -30,8 +31,11 @@ __all__ = [
     "diagnosis_to_markdown",
     "explanation_to_dict",
     "explanation_to_markdown",
+    "fixes_to_dict",
+    "fixes_to_markdown",
     "render_diagnosis",
     "render_explanation",
+    "render_fixes",
 ]
 
 
@@ -104,6 +108,32 @@ def _fix_line(fix: FixSuggestion | None) -> str:
     )
 
 
+def render_fixes(
+    result: CounterfactualResult,
+    console: Console | None = None,
+    *,
+    show_all: bool = False,
+) -> None:
+    """Render a :class:`CounterfactualResult` as rich output to ``console``.
+
+    Prints only the cheapest fix unless ``show_all`` is set, in which case every
+    fix is listed in ``(cost, axis_priority)`` order.
+    """
+    out = console or Console()
+    if result.unevaluable:
+        out.print(f"[dim]unevaluable axes:[/dim] {', '.join(result.unevaluable)}")
+    if result.best is None:
+        out.print("[yellow]no single bounded config change surfaced the chunk[/yellow]")
+        return
+    fixes = result.all_fixes if show_all else [result.best]
+    for suggestion in fixes:
+        out.print(
+            f"[green]{suggestion.param}[/green] {suggestion.from_value!r} -> "
+            f"{suggestion.to_value!r}  (cost={suggestion.cost}, "
+            f"new_rank={suggestion.new_rank})  {suggestion.explanation}"
+        )
+
+
 def explanation_to_markdown(explanation: Explanation) -> str:
     """Return a Markdown rendering of an :class:`Explanation`."""
     lines: list[str] = []
@@ -157,8 +187,38 @@ def diagnosis_to_markdown(diagnosis: DiagnosisResult) -> str:
     return "\n".join(lines) + "\n"
 
 
+def fixes_to_markdown(result: CounterfactualResult, *, show_all: bool = False) -> str:
+    """Return a Markdown rendering of a :class:`CounterfactualResult`."""
+    lines: list[str] = ["## fix", ""]
+    if result.unevaluable:
+        lines.append(f"- unevaluable axes: {', '.join(result.unevaluable)}")
+        lines.append("")
+    if result.best is None:
+        lines.append("- fix: _no single bounded config change surfaced the chunk_")
+        return "\n".join(lines) + "\n"
+    fixes = result.all_fixes if show_all else [result.best]
+    lines.append("| param | from | to | cost | new rank | explanation |")
+    lines.append("| --- | --- | --- | ---: | ---: | --- |")
+    for fix in fixes:
+        explanation = fix.explanation.replace("|", "\\|")
+        lines.append(
+            f"| `{fix.param}` | `{fix.from_value}` | `{fix.to_value}` | "
+            f"{fix.cost} | {fix.new_rank} | {explanation} |"
+        )
+    return "\n".join(lines) + "\n"
+
+
 def _fix_to_dict(fix: FixSuggestion | None) -> dict[str, Any] | None:
     return asdict(fix) if fix is not None else None
+
+
+def fixes_to_dict(result: CounterfactualResult) -> dict[str, Any]:
+    """Return a JSON-serializable dict for a :class:`CounterfactualResult`."""
+    return {
+        "best": _fix_to_dict(result.best),
+        "all_fixes": [asdict(fix) for fix in result.all_fixes],
+        "unevaluable": result.unevaluable,
+    }
 
 
 def explanation_to_dict(explanation: Explanation) -> dict[str, Any]:
