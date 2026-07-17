@@ -12,6 +12,9 @@ from why_this_chunk.cli import app
 
 runner = CliRunner()
 
+#: The bundled example corpus/queries, used to pin deterministic batch aggregates.
+EXAMPLES = Path(__file__).resolve().parent.parent / "examples"
+
 
 @pytest.fixture
 def corpus_file(tmp_path: Path) -> Path:
@@ -293,6 +296,133 @@ def test_explain_dense_mode(corpus_file: Path) -> None:
         ["explain", "Paris France", "--corpus", str(corpus_file), "--mode", "dense", "--k", "1"],
     )
     assert result.exit_code == 0, result.output
+
+
+def test_batch_aggregate_counts_deterministic() -> None:
+    result = runner.invoke(
+        app,
+        [
+            "batch",
+            "--queries",
+            str(EXAMPLES / "queries.jsonl"),
+            "--corpus",
+            str(EXAMPLES / "corpus.jsonl"),
+            "--k",
+            "1",
+            "--format",
+            "json",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert payload["count"] == 8
+    assert payload["failure_counts"] == {
+        "missing_from_index": 1,
+        "out_ranked": 6,
+        "none": 1,
+    }
+    assert payload["fix_axis_counts"] == {"top_k": 5, "alpha": 2}
+    assert payload["top_fix_axis"] == "top_k"
+    assert len(payload["rows"]) == 8
+
+
+def test_batch_rich_output() -> None:
+    result = runner.invoke(
+        app,
+        [
+            "batch",
+            "--queries",
+            str(EXAMPLES / "queries.jsonl"),
+            "--corpus",
+            str(EXAMPLES / "corpus.jsonl"),
+            "--k",
+            "1",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    assert "batch" in result.output
+    assert "most common fix axis" in result.output
+
+
+def test_batch_markdown_output() -> None:
+    result = runner.invoke(
+        app,
+        [
+            "batch",
+            "--queries",
+            str(EXAMPLES / "queries.jsonl"),
+            "--corpus",
+            str(EXAMPLES / "corpus.jsonl"),
+            "--k",
+            "1",
+            "--format",
+            "md",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    assert "## batch" in result.output
+    assert "| query | expect | failure | fix |" in result.output
+
+
+def test_batch_malformed_line_exits_2(tmp_path: Path) -> None:
+    queries = tmp_path / "queries.jsonl"
+    queries.write_text('{"query": "ok", "expect": "paris"}\nnot valid json\n', encoding="utf-8")
+    result = runner.invoke(
+        app,
+        ["batch", "--queries", str(queries), "--corpus", str(EXAMPLES / "corpus.jsonl")],
+    )
+    assert result.exit_code == 2
+    # The error is line-numbered; normalize rich's wrapping before asserting.
+    assert ":2:" in "".join(result.output.split())
+
+
+def test_batch_missing_keys_exits_2(tmp_path: Path) -> None:
+    queries = tmp_path / "queries.jsonl"
+    queries.write_text('{"query": "missing expect key"}\n', encoding="utf-8")
+    result = runner.invoke(
+        app,
+        ["batch", "--queries", str(queries), "--corpus", str(EXAMPLES / "corpus.jsonl")],
+    )
+    assert result.exit_code == 2
+    assert ":1:" in "".join(result.output.split())
+
+
+def test_batch_empty_file(tmp_path: Path) -> None:
+    queries = tmp_path / "queries.jsonl"
+    queries.write_text("", encoding="utf-8")
+    result = runner.invoke(
+        app,
+        [
+            "batch",
+            "--queries",
+            str(queries),
+            "--corpus",
+            str(EXAMPLES / "corpus.jsonl"),
+            "--format",
+            "json",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert payload["count"] == 0
+    assert payload["rows"] == []
+    assert payload["failure_counts"] == {}
+    assert payload["top_fix_axis"] is None
+
+
+def test_batch_missing_queries_file() -> None:
+    result = runner.invoke(
+        app,
+        [
+            "batch",
+            "--queries",
+            "/no/such/queries.jsonl",
+            "--corpus",
+            str(EXAMPLES / "corpus.jsonl"),
+        ],
+    )
+    assert result.exit_code == 2
+    assert "not found" in result.output
 
 
 def test_no_args_shows_help() -> None:

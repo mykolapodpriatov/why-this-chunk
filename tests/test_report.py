@@ -13,11 +13,15 @@ from why_this_chunk import (
     explain_chunk,
     search_fixes,
 )
+from why_this_chunk.batch import BatchQuery, run_batch
 from why_this_chunk.report import (
+    batch_to_dict,
+    batch_to_markdown,
     diagnosis_to_dict,
     diagnosis_to_markdown,
     explanation_to_dict,
     explanation_to_markdown,
+    render_batch,
     render_diagnosis,
     render_explanation,
 )
@@ -106,6 +110,28 @@ def test_diagnosis_dict_is_json_safe(hybrid: HybridRetriever) -> None:
 
     diag = diagnose(hybrid, "Paris", "seine", RetrievalConfig(top_k=1, alpha=0.5))
     json.dumps(diagnosis_to_dict(diag))  # must not raise
+
+
+def test_render_batch_and_exports_do_not_crash(hybrid: HybridRetriever) -> None:
+    import json
+
+    queries = [
+        BatchQuery(query="Paris France", expect="seine"),
+        BatchQuery(query="Paris France", expect="nonexistent"),
+    ]
+    result = run_batch(hybrid, queries, RetrievalConfig(top_k=1, alpha=0.5))
+    render_batch(result, _quiet_console())
+    md = batch_to_markdown(result)
+    assert md.startswith("## batch")
+    assert "| query | expect | failure | fix |" in md
+    json.dumps(batch_to_dict(result))  # must not raise
+
+
+def test_render_batch_empty(hybrid: HybridRetriever) -> None:
+    result = run_batch(hybrid, [], RetrievalConfig(top_k=1, alpha=0.5))
+    render_batch(result, _quiet_console())  # empty path must not crash
+    assert "no queries" in batch_to_markdown(result)
+    assert batch_to_dict(result)["count"] == 0
 
 
 def test_markdown_escapes_pipe_in_text() -> None:

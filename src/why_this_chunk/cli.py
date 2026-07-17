@@ -19,17 +19,21 @@ import typer
 from rich.console import Console
 
 from why_this_chunk.attribution import explain_chunk
+from why_this_chunk.batch import BatchQuery, load_queries, run_batch
 from why_this_chunk.config import RetrievalConfig
 from why_this_chunk.corpus import Corpus
 from why_this_chunk.counterfactual import search_fixes
 from why_this_chunk.embedders import FakeEmbedder
 from why_this_chunk.report import (
+    batch_to_dict,
+    batch_to_markdown,
     diagnosis_to_dict,
     diagnosis_to_markdown,
     explanation_to_dict,
     explanation_to_markdown,
     fixes_to_dict,
     fixes_to_markdown,
+    render_batch,
     render_diagnosis,
     render_explanation,
     render_fixes,
@@ -90,6 +94,17 @@ def _load_corpus(corpus_path: Path) -> Corpus:
         raise typer.Exit(code=2)
     try:
         return Corpus.from_jsonl(corpus_path)
+    except ValueError as exc:
+        _err_console.print(f"[red]error:[/red] {exc}")
+        raise typer.Exit(code=2) from exc
+
+
+def _load_queries(queries_path: Path) -> list[BatchQuery]:
+    if not queries_path.is_file():
+        _err_console.print(f"[red]error:[/red] queries file not found: {queries_path}")
+        raise typer.Exit(code=2)
+    try:
+        return load_queries(queries_path)
     except ValueError as exc:
         _err_console.print(f"[red]error:[/red] {exc}")
         raise typer.Exit(code=2) from exc
@@ -230,6 +245,40 @@ def fix(
         sys.stdout.write(fixes_to_markdown(result, show_all=show_all))
         return
     render_fixes(result, _console, show_all=show_all)
+
+
+@app.command()
+def batch(
+    queries: Path = typer.Option(
+        ..., "--queries", help="JSON-Lines file of {'query', 'expect'} rows."
+    ),
+    corpus: Path = typer.Option(..., "--corpus", help="Path to a JSON-Lines corpus."),
+    k: int = typer.Option(5, "--k", min=1, help="Top-K under evaluation."),
+    mode: Mode = typer.Option(Mode.HYBRID, "--mode", help="Retriever mode."),
+    alpha: float = typer.Option(0.5, "--alpha", min=0.0, max=1.0, help="Hybrid alpha."),
+    seed: int = typer.Option(0, "--seed", help="FakeEmbedder seed (determinism)."),
+    output_format: OutputFormat = typer.Option(
+        OutputFormat.RICH, "--format", help="Output shape: rich, md, or json."
+    ),
+    as_json: bool = typer.Option(
+        False, "--json", hidden=True, help="Deprecated alias for --format json."
+    ),
+) -> None:
+    """Diagnose a whole queries file and aggregate the failures and fixes."""
+    fmt = _resolve_format(output_format, as_json)
+    batch_queries = _load_queries(queries)
+    loaded = _load_corpus(corpus)
+    retriever = _build_retriever(loaded, mode, alpha, seed)
+    config = RetrievalConfig(top_k=k, alpha=alpha if mode is Mode.HYBRID else None)
+    result = run_batch(retriever, batch_queries, config)
+
+    if fmt is OutputFormat.JSON:
+        _console.print_json(json_module.dumps(batch_to_dict(result)))
+        return
+    if fmt is OutputFormat.MD:
+        sys.stdout.write(batch_to_markdown(result))
+        return
+    render_batch(result, _console)
 
 
 @app.command()
