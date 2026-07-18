@@ -7,7 +7,32 @@ from pathlib import Path
 import pytest
 
 from why_this_chunk import HybridRetriever, RetrievalConfig
-from why_this_chunk.batch import BatchQuery, load_queries, run_batch
+from why_this_chunk.batch import (
+    BatchQuery,
+    BatchResult,
+    BatchRow,
+    has_failures,
+    has_unfixable,
+    load_queries,
+    run_batch,
+)
+from why_this_chunk.types import FailureClass, FixSuggestion
+
+
+def _result(rows: list[BatchRow]) -> BatchResult:
+    """Wrap rows in a minimal ``BatchResult`` for gate-predicate tests."""
+    return BatchResult(rows=rows, failure_counts={}, fix_axis_counts={}, top_fix_axis=None)
+
+
+def _fix() -> FixSuggestion:
+    return FixSuggestion(
+        param="top_k",
+        from_value=1,
+        to_value=2,
+        cost=1,
+        new_rank=1,
+        explanation="raise top_k",
+    )
 
 
 def test_load_queries_reads_records(tmp_path: Path) -> None:
@@ -65,3 +90,36 @@ def test_run_batch_empty_is_inert(hybrid: HybridRetriever) -> None:
     assert result.failure_counts == {}
     assert result.fix_axis_counts == {}
     assert result.top_fix_axis is None
+
+
+def test_has_failures_and_unfixable_clean_run() -> None:
+    # Every row already retrieves its expected chunk: neither gate should trip.
+    rows = [
+        BatchRow(query="a", expect="x", failure_class=None, fix=None),
+        BatchRow(query="b", expect="y", failure_class=None, fix=None),
+    ]
+    result = _result(rows)
+    assert has_failures(result) is False
+    assert has_unfixable(result) is False
+
+
+def test_has_failures_true_but_fixable_is_not_unfixable() -> None:
+    # A classified failure that still has a bounded fix: 'failure' trips,
+    # 'unfixable' does not.
+    rows = [
+        BatchRow(query="a", expect="x", failure_class=None, fix=None),
+        BatchRow(query="b", expect="y", failure_class=FailureClass.OUT_RANKED, fix=_fix()),
+    ]
+    result = _result(rows)
+    assert has_failures(result) is True
+    assert has_unfixable(result) is False
+
+
+def test_has_unfixable_true_when_failing_row_has_no_fix() -> None:
+    # A failing row with no bounded fix trips both thresholds.
+    rows = [
+        BatchRow(query="a", expect="x", failure_class=FailureClass.MISSING_FROM_INDEX, fix=None),
+    ]
+    result = _result(rows)
+    assert has_failures(result) is True
+    assert has_unfixable(result) is True

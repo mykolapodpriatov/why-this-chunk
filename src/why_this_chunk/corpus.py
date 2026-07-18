@@ -17,7 +17,7 @@ from pathlib import Path
 from why_this_chunk.source import Chunker, SourceDocument
 from why_this_chunk.types import Chunk
 
-__all__ = ["Corpus"]
+__all__ = ["Corpus", "lint_jsonl"]
 
 
 class Corpus:
@@ -172,6 +172,63 @@ class Corpus:
 
     def __iter__(self) -> Iterator[Chunk]:
         return iter(self._chunks)
+
+
+def lint_jsonl(path: str | Path) -> list[str]:
+    """Return every structural problem in a corpus JSON-Lines file, line-numbered.
+
+    A collecting companion to :meth:`Corpus.from_jsonl`, intended for
+    pre-commit/CI use: where the loader raises on the *first* problem, this
+    scans the whole file and reports *all* of them so an author can fix a file
+    in one pass. It mirrors the loader's parsing exactly, then adds the
+    line-numbered duplicate/blank checks the constructor's invariant cannot
+    express. Each returned string is prefixed with ``path:line`` (1-based).
+
+    Detected, per non-blank line:
+
+    * invalid JSON;
+    * a non-object record, or one missing ``id`` / ``text``;
+    * a blank (empty or whitespace-only) ``id`` or ``text`` value;
+    * a duplicate ``id`` (naming the earlier line it first appeared on).
+
+    Blank lines are skipped, matching the loader.
+
+    Args:
+        path: Path to the ``.jsonl`` corpus file.
+
+    Returns:
+        The problems in first-seen order; an empty list when the file is clean.
+    """
+    file_path = Path(path)
+    problems: list[str] = []
+    first_seen: dict[str, int] = {}
+    with file_path.open("r", encoding="utf-8") as handle:
+        for line_number, raw in enumerate(handle, start=1):
+            stripped = raw.strip()
+            if not stripped:
+                continue
+            try:
+                record = json.loads(stripped)
+            except json.JSONDecodeError as exc:
+                problems.append(f"{file_path}:{line_number}: invalid JSON ({exc.msg})")
+                continue
+            if not isinstance(record, dict) or "id" not in record or "text" not in record:
+                problems.append(f"{file_path}:{line_number}: each line needs 'id' and 'text' keys")
+                continue
+            chunk_id = str(record["id"])
+            if not chunk_id.strip():
+                problems.append(f"{file_path}:{line_number}: blank chunk id")
+            if not str(record["text"]).strip():
+                problems.append(f"{file_path}:{line_number}: blank text for id {chunk_id!r}")
+            earlier = first_seen.get(chunk_id)
+            if earlier is not None:
+                problems.append(
+                    f"{file_path}:{line_number}: duplicate id {chunk_id!r} "
+                    f"(first seen on line {earlier})"
+                )
+            else:
+                first_seen[chunk_id] = line_number
+    return problems
 
 
 def _reconstruct_sources(chunks: list[Chunk]) -> list[SourceDocument] | None:

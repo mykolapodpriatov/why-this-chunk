@@ -31,6 +31,8 @@ __all__ = [
     "BatchQuery",
     "BatchResult",
     "BatchRow",
+    "has_failures",
+    "has_unfixable",
     "load_queries",
     "run_batch",
 ]
@@ -158,6 +160,40 @@ def run_batch(
         fix_axis_counts=_ordered_axis_counts(fix_axis_counter),
         top_fix_axis=_top_axis(fix_axis_counter),
     )
+
+
+def has_failures(result: BatchResult) -> bool:
+    """Whether any row was classified into a failure class.
+
+    A row has a failure when its expected chunk did not surface within ``top_k``
+    (any non-``None`` :class:`~why_this_chunk.types.FailureClass`) — the signal a
+    CI gate uses to fail on a RAG regression. Rows already retrieving the
+    expected chunk (``failure_class is None``) never count.
+
+    Args:
+        result: The aggregate batch outcome to inspect.
+
+    Returns:
+        ``True`` if at least one row has a failure class, else ``False``.
+    """
+    return any(row.failure_class is not None for row in result.rows)
+
+
+def has_unfixable(result: BatchResult) -> bool:
+    """Whether any failing row has no bounded single-axis fix.
+
+    A row is *unfixable* when it both has a failure class **and** the bounded
+    counterfactual search found no config change (``fix is None``) that surfaces
+    the expected chunk — the strictest CI signal, catching regressions no single
+    documented knob can recover.
+
+    Args:
+        result: The aggregate batch outcome to inspect.
+
+    Returns:
+        ``True`` if at least one failing row lacks a fix, else ``False``.
+    """
+    return any(row.failure_class is not None and row.fix is None for row in result.rows)
 
 
 def _ordered_failure_counts(counter: Counter[str]) -> dict[str, int]:
