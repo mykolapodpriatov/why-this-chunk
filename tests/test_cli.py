@@ -410,6 +410,92 @@ def test_batch_empty_file(tmp_path: Path) -> None:
     assert payload["top_fix_axis"] is None
 
 
+def test_batch_fail_on_none_is_default_exit_zero() -> None:
+    # Even with failures present, the default gate ('none') never fails CI.
+    result = runner.invoke(
+        app,
+        [
+            "batch",
+            "--queries",
+            str(EXAMPLES / "queries.jsonl"),
+            "--corpus",
+            str(EXAMPLES / "corpus.jsonl"),
+            "--k",
+            "1",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+
+
+def test_batch_fail_on_failure_exits_one() -> None:
+    result = runner.invoke(
+        app,
+        [
+            "batch",
+            "--queries",
+            str(EXAMPLES / "queries.jsonl"),
+            "--corpus",
+            str(EXAMPLES / "corpus.jsonl"),
+            "--k",
+            "1",
+            "--fail-on",
+            "failure",
+        ],
+    )
+    # A regression is present at k=1, so the gate trips — but the report is
+    # still emitted before the non-zero exit.
+    assert result.exit_code == 1, result.output
+    assert "batch" in result.output
+
+
+def test_batch_fail_on_unfixable_exits_one() -> None:
+    # The 'does-not-exist' expectation is a failure with no bounded fix.
+    result = runner.invoke(
+        app,
+        [
+            "batch",
+            "--queries",
+            str(EXAMPLES / "queries.jsonl"),
+            "--corpus",
+            str(EXAMPLES / "corpus.jsonl"),
+            "--k",
+            "1",
+            "--fail-on",
+            "unfixable",
+        ],
+    )
+    assert result.exit_code == 1, result.output
+
+
+def test_batch_fail_on_failure_clean_run_exits_zero(tmp_path: Path) -> None:
+    # With k=8 every existing expected chunk is retrieved, so no row fails.
+    queries = tmp_path / "clean.jsonl"
+    queries.write_text(
+        '{"query": "capital of France", "expect": "paris"}\n'
+        '{"query": "Python numerical computing library", "expect": "numpy"}\n',
+        encoding="utf-8",
+    )
+    result = runner.invoke(
+        app,
+        [
+            "batch",
+            "--queries",
+            str(queries),
+            "--corpus",
+            str(EXAMPLES / "corpus.jsonl"),
+            "--k",
+            "8",
+            "--fail-on",
+            "failure",
+            "--format",
+            "json",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert payload["failure_counts"] == {"none": 2}
+
+
 def test_batch_missing_queries_file() -> None:
     result = runner.invoke(
         app,

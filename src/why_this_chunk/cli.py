@@ -19,7 +19,14 @@ import typer
 from rich.console import Console
 
 from why_this_chunk.attribution import explain_chunk
-from why_this_chunk.batch import BatchQuery, load_queries, run_batch
+from why_this_chunk.batch import (
+    BatchQuery,
+    BatchResult,
+    has_failures,
+    has_unfixable,
+    load_queries,
+    run_batch,
+)
 from why_this_chunk.config import RetrievalConfig
 from why_this_chunk.corpus import Corpus
 from why_this_chunk.counterfactual import search_fixes
@@ -77,6 +84,32 @@ class OutputFormat(StrEnum):
     RICH = "rich"
     MD = "md"
     JSON = "json"
+
+
+class FailOn(StrEnum):
+    """CI-gate thresholds for ``batch``'s exit code.
+
+    ``none`` never fails; ``failure`` fails on any classified failure; and
+    ``unfixable`` fails only on failures with no bounded single-axis fix.
+    """
+
+    NONE = "none"
+    FAILURE = "failure"
+    UNFIXABLE = "unfixable"
+
+
+#: Exit code raised when a ``batch`` CI gate trips, distinct from the ``2`` used
+#: for usage/IO errors so pipelines can tell a regression from a bad invocation.
+_GATE_EXIT_CODE = 1
+
+
+def _gate_tripped(result: BatchResult, fail_on: FailOn) -> bool:
+    """Whether the ``--fail-on`` threshold is met by ``result``."""
+    if fail_on is FailOn.FAILURE:
+        return has_failures(result)
+    if fail_on is FailOn.UNFIXABLE:
+        return has_unfixable(result)
+    return False
 
 
 def _resolve_format(output_format: OutputFormat, as_json: bool) -> OutputFormat:
@@ -260,6 +293,11 @@ def batch(
     output_format: OutputFormat = typer.Option(
         OutputFormat.RICH, "--format", help="Output shape: rich, md, or json."
     ),
+    fail_on: FailOn = typer.Option(
+        FailOn.NONE,
+        "--fail-on",
+        help="CI gate: exit non-zero on any 'failure' or on an 'unfixable' one.",
+    ),
     as_json: bool = typer.Option(
         False, "--json", hidden=True, help="Deprecated alias for --format json."
     ),
@@ -274,11 +312,15 @@ def batch(
 
     if fmt is OutputFormat.JSON:
         _console.print_json(json_module.dumps(batch_to_dict(result)))
-        return
-    if fmt is OutputFormat.MD:
+    elif fmt is OutputFormat.MD:
         sys.stdout.write(batch_to_markdown(result))
-        return
-    render_batch(result, _console)
+    else:
+        render_batch(result, _console)
+
+    # Report the results first, then trip the CI gate so pipelines still see the
+    # full diagnosis before the non-zero exit.
+    if _gate_tripped(result, fail_on):
+        raise typer.Exit(code=_GATE_EXIT_CODE)
 
 
 @app.command()
