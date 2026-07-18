@@ -1,6 +1,10 @@
-"""Typer command-line interface: ``explain``, ``diagnose``, ``fix``, ``serve``.
+"""Typer CLI: ``explain``, ``diagnose``, ``fix``, ``batch``, ``validate``, ``serve``.
 
-All commands build a retriever from a JSON-Lines corpus using the offline
+The analysis commands build a retriever over either a pre-chunked JSON-Lines
+corpus (``--corpus``) or raw ``{id, text}`` source documents chunked on the fly
+(``--from-sources`` with ``--chunk-size``/``--overlap``); the latter carries
+provenance, so the ``chunk_size`` counterfactual axis and ``lost_to_chunking``
+check become evaluable from the command line. Retrieval uses the offline
 :class:`~why_this_chunk.embedders.fake.FakeEmbedder` by default, so the CLI runs
 with zero downloads. A single ``--format {rich,md,json}`` switch selects the
 output shape (rich terminal view by default, Markdown, or machine-readable
@@ -49,6 +53,7 @@ from why_this_chunk.retrievers import Retriever
 from why_this_chunk.retrievers.bm25 import BM25Retriever
 from why_this_chunk.retrievers.dense import DenseRetriever
 from why_this_chunk.retrievers.hybrid import HybridRetriever
+from why_this_chunk.source import Chunker, FixedSizeChunker, SourceDocument
 from why_this_chunk.taxonomy import diagnose as run_diagnose
 from why_this_chunk.types import DiagnosisResult
 
@@ -143,21 +148,102 @@ def _load_queries(queries_path: Path) -> list[BatchQuery]:
         raise typer.Exit(code=2) from exc
 
 
-def _build_retriever(corpus: Corpus, mode: Mode, alpha: float, seed: int) -> Retriever:
+def _load_sources(sources_path: Path) -> list[SourceDocument]:
+    """Load ``{id, text}`` raw documents from a JSON-Lines file.
+
+    Mirrors :meth:`Corpus.from_jsonl`'s strict, line-numbered parsing so a
+    malformed source file fails with the same precise diagnostic and exit code.
+    """
+    if not sources_path.is_file():
+        _err_console.print(f"[red]error:[/red] sources file not found: {sources_path}")
+        raise typer.Exit(code=2)
+    docs: list[SourceDocument] = []
+    try:
+        with sources_path.open("r", encoding="utf-8") as handle:
+            for line_number, raw in enumerate(handle, start=1):
+                stripped = raw.strip()
+                if not stripped:
+                    continue
+                try:
+                    record = json_module.loads(stripped)
+                except json_module.JSONDecodeError as exc:
+                    raise ValueError(
+                        f"{sources_path}:{line_number}: invalid JSON ({exc.msg})"
+                    ) from exc
+                if not isinstance(record, dict) or "id" not in record or "text" not in record:
+                    raise ValueError(
+                        f"{sources_path}:{line_number}: each line needs 'id' and 'text' keys"
+                    )
+                docs.append(SourceDocument(id=str(record["id"]), text=str(record["text"])))
+    except ValueError as exc:
+        _err_console.print(f"[red]error:[/red] {exc}")
+        raise typer.Exit(code=2) from exc
+    return docs
+
+
+def _resolve_corpus(
+    corpus: Path | None,
+    from_sources: Path | None,
+    chunk_size: int,
+    overlap: int,
+) -> tuple[Corpus, Chunker | None]:
+    """Build the corpus from exactly one of ``--corpus`` or ``--from-sources``.
+
+    Returns the corpus and, when built from sources, the chunker that makes the
+    ``chunk_size`` axis re-chunkable (``None`` for a pre-chunked corpus). The two
+    inputs are mutually exclusive; giving both or neither is a usage error.
+    """
+    if (corpus is None) == (from_sources is None):
+        _err_console.print("[red]error:[/red] provide exactly one of --corpus or --from-sources")
+        raise typer.Exit(code=2)
+    if from_sources is not None:
+        docs = _load_sources(from_sources)
+        try:
+            chunker = FixedSizeChunker(overlap=overlap)
+            built = Corpus.from_sources(docs, chunker, chunk_size)
+        except ValueError as exc:
+            _err_console.print(f"[red]error:[/red] {exc}")
+            raise typer.Exit(code=2) from exc
+        return built, chunker
+    assert corpus is not None  # guaranteed by the exclusivity check above
+    return _load_corpus(corpus), None
+
+
+def _build_retriever(
+    corpus: Corpus,
+    mode: Mode,
+    alpha: float,
+    seed: int,
+    chunker: Chunker | None = None,
+    config: RetrievalConfig | None = None,
+) -> Retriever:
     if mode is Mode.BM25:
-        return BM25Retriever(corpus)
+        return BM25Retriever(corpus, chunker=chunker, config=config)
     embedder = FakeEmbedder(seed=seed)
     if mode is Mode.DENSE:
-        return DenseRetriever(corpus, embedder)
-    dense = DenseRetriever(corpus, embedder)
-    lexical = BM25Retriever(corpus)
+        return DenseRetriever(corpus, embedder, chunker=chunker, config=config)
+    dense = DenseRetriever(corpus, embedder, chunker=chunker, config=config)
+    lexical = BM25Retriever(corpus, chunker=chunker, config=config)
     return HybridRetriever(dense, lexical, alpha=alpha)
 
 
 @app.command()
 def explain(
     query: str = typer.Argument(..., help="The query to explain."),
-    corpus: Path = typer.Option(..., "--corpus", help="Path to a JSON-Lines corpus."),
+    corpus: Path | None = typer.Option(
+        None, "--corpus", help="Path to a pre-chunked JSON-Lines corpus."
+    ),
+    from_sources: Path | None = typer.Option(
+        None,
+        "--from-sources",
+        help="Path to a JSON-Lines file of {id, text} raw documents to chunk on the fly.",
+    ),
+    chunk_size: int = typer.Option(
+        512, "--chunk-size", min=1, help="Chunk size (chars) when --from-sources is used."
+    ),
+    overlap: int = typer.Option(
+        0, "--overlap", min=0, help="Inter-chunk overlap (chars) when --from-sources is used."
+    ),
     k: int = typer.Option(5, "--k", min=1, help="Number of results to explain."),
     granularity: Granularity = typer.Option(
         Granularity.SENTENCE, "--granularity", help="Attribution unit."
@@ -174,8 +260,11 @@ def explain(
 ) -> None:
     """Attribute each top-K result's score to its sentences (and the hybrid split)."""
     fmt = _resolve_format(output_format, as_json)
-    loaded = _load_corpus(corpus)
-    retriever = _build_retriever(loaded, mode, alpha, seed)
+    loaded, chunker = _resolve_corpus(corpus, from_sources, chunk_size, overlap)
+    config = RetrievalConfig(
+        top_k=k, chunk_size=chunk_size, alpha=alpha if mode is Mode.HYBRID else None
+    )
+    retriever = _build_retriever(loaded, mode, alpha, seed, chunker, config)
     results = retriever.search(query, k)
     explanations = [
         explain_chunk(retriever, query, result, granularity.value) for result in results
@@ -219,7 +308,20 @@ def _diagnose_with_fix(
 def diagnose(
     query: str = typer.Argument(..., help="The failing query."),
     expect: str = typer.Option(..., "--expect", help="Id of the known-correct chunk."),
-    corpus: Path = typer.Option(..., "--corpus", help="Path to a JSON-Lines corpus."),
+    corpus: Path | None = typer.Option(
+        None, "--corpus", help="Path to a pre-chunked JSON-Lines corpus."
+    ),
+    from_sources: Path | None = typer.Option(
+        None,
+        "--from-sources",
+        help="Path to a JSON-Lines file of {id, text} raw documents to chunk on the fly.",
+    ),
+    chunk_size: int = typer.Option(
+        512, "--chunk-size", min=1, help="Chunk size (chars) when --from-sources is used."
+    ),
+    overlap: int = typer.Option(
+        0, "--overlap", min=0, help="Inter-chunk overlap (chars) when --from-sources is used."
+    ),
     k: int = typer.Option(5, "--k", min=1, help="Top-K under evaluation."),
     mode: Mode = typer.Option(Mode.HYBRID, "--mode", help="Retriever mode."),
     alpha: float = typer.Option(0.5, "--alpha", min=0.0, max=1.0, help="Hybrid alpha."),
@@ -233,9 +335,11 @@ def diagnose(
 ) -> None:
     """Classify why an expected chunk failed and report the minimal fix."""
     fmt = _resolve_format(output_format, as_json)
-    loaded = _load_corpus(corpus)
-    retriever = _build_retriever(loaded, mode, alpha, seed)
-    config = RetrievalConfig(top_k=k, alpha=alpha if mode is Mode.HYBRID else None)
+    loaded, chunker = _resolve_corpus(corpus, from_sources, chunk_size, overlap)
+    config = RetrievalConfig(
+        top_k=k, chunk_size=chunk_size, alpha=alpha if mode is Mode.HYBRID else None
+    )
+    retriever = _build_retriever(loaded, mode, alpha, seed, chunker, config)
     result = _diagnose_with_fix(retriever, query, expect, config)
 
     if fmt is OutputFormat.JSON:
@@ -251,7 +355,20 @@ def diagnose(
 def fix(
     query: str = typer.Argument(..., help="The failing query."),
     expect: str = typer.Option(..., "--expect", help="Id of the known-correct chunk."),
-    corpus: Path = typer.Option(..., "--corpus", help="Path to a JSON-Lines corpus."),
+    corpus: Path | None = typer.Option(
+        None, "--corpus", help="Path to a pre-chunked JSON-Lines corpus."
+    ),
+    from_sources: Path | None = typer.Option(
+        None,
+        "--from-sources",
+        help="Path to a JSON-Lines file of {id, text} raw documents to chunk on the fly.",
+    ),
+    chunk_size: int = typer.Option(
+        512, "--chunk-size", min=1, help="Chunk size (chars) when --from-sources is used."
+    ),
+    overlap: int = typer.Option(
+        0, "--overlap", min=0, help="Inter-chunk overlap (chars) when --from-sources is used."
+    ),
     k: int = typer.Option(5, "--k", min=1, help="Top-K under evaluation."),
     mode: Mode = typer.Option(Mode.HYBRID, "--mode", help="Retriever mode."),
     alpha: float = typer.Option(0.5, "--alpha", min=0.0, max=1.0, help="Hybrid alpha."),
@@ -266,9 +383,11 @@ def fix(
 ) -> None:
     """Report the single cheapest config change (or all of them with --all)."""
     fmt = _resolve_format(output_format, as_json)
-    loaded = _load_corpus(corpus)
-    retriever = _build_retriever(loaded, mode, alpha, seed)
-    config = RetrievalConfig(top_k=k, alpha=alpha if mode is Mode.HYBRID else None)
+    loaded, chunker = _resolve_corpus(corpus, from_sources, chunk_size, overlap)
+    config = RetrievalConfig(
+        top_k=k, chunk_size=chunk_size, alpha=alpha if mode is Mode.HYBRID else None
+    )
+    retriever = _build_retriever(loaded, mode, alpha, seed, chunker, config)
     result = search_fixes(retriever, query, expect, config)
 
     if fmt is OutputFormat.JSON:
@@ -285,7 +404,20 @@ def batch(
     queries: Path = typer.Option(
         ..., "--queries", help="JSON-Lines file of {'query', 'expect'} rows."
     ),
-    corpus: Path = typer.Option(..., "--corpus", help="Path to a JSON-Lines corpus."),
+    corpus: Path | None = typer.Option(
+        None, "--corpus", help="Path to a pre-chunked JSON-Lines corpus."
+    ),
+    from_sources: Path | None = typer.Option(
+        None,
+        "--from-sources",
+        help="Path to a JSON-Lines file of {id, text} raw documents to chunk on the fly.",
+    ),
+    chunk_size: int = typer.Option(
+        512, "--chunk-size", min=1, help="Chunk size (chars) when --from-sources is used."
+    ),
+    overlap: int = typer.Option(
+        0, "--overlap", min=0, help="Inter-chunk overlap (chars) when --from-sources is used."
+    ),
     k: int = typer.Option(5, "--k", min=1, help="Top-K under evaluation."),
     mode: Mode = typer.Option(Mode.HYBRID, "--mode", help="Retriever mode."),
     alpha: float = typer.Option(0.5, "--alpha", min=0.0, max=1.0, help="Hybrid alpha."),
@@ -305,9 +437,11 @@ def batch(
     """Diagnose a whole queries file and aggregate the failures and fixes."""
     fmt = _resolve_format(output_format, as_json)
     batch_queries = _load_queries(queries)
-    loaded = _load_corpus(corpus)
-    retriever = _build_retriever(loaded, mode, alpha, seed)
-    config = RetrievalConfig(top_k=k, alpha=alpha if mode is Mode.HYBRID else None)
+    loaded, chunker = _resolve_corpus(corpus, from_sources, chunk_size, overlap)
+    config = RetrievalConfig(
+        top_k=k, chunk_size=chunk_size, alpha=alpha if mode is Mode.HYBRID else None
+    )
+    retriever = _build_retriever(loaded, mode, alpha, seed, chunker, config)
     result = run_batch(retriever, batch_queries, config)
 
     if fmt is OutputFormat.JSON:

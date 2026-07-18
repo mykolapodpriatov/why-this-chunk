@@ -30,6 +30,30 @@ def corpus_file(tmp_path: Path) -> Path:
     return path
 
 
+@pytest.fixture
+def sources_file(tmp_path: Path) -> Path:
+    """A raw ``{id, text}`` document long enough to split under small chunk sizes.
+
+    At ``--chunk-size 128`` the query terms land in different windows, but a
+    single ``256``-char window keeps them together — so the ``chunk_size`` axis
+    yields a real, evaluable fix (unlike a pre-chunked corpus, which cannot be
+    re-chunked and reports the axis unevaluable).
+    """
+    path = tmp_path / "sources.jsonl"
+    line = {
+        "id": "doc1",
+        "text": (
+            "The capital of France is Paris and it is famous. "
+            "Many unrelated filler sentences about weather and food follow here now. "
+            "Bananas potassium tropical fruit yellow elongated edible sweet ripe soft. "
+            "More filler about programming languages and databases and networking too. "
+            "Finally the Seine river flows through the northern part of the country here."
+        ),
+    }
+    path.write_text(json.dumps(line), encoding="utf-8")
+    return path
+
+
 def test_explain_rich_output(corpus_file: Path) -> None:
     result = runner.invoke(
         app, ["explain", "capital of France Paris", "--corpus", str(corpus_file), "--k", "2"]
@@ -582,6 +606,147 @@ def test_validate_missing_corpus_file() -> None:
     result = runner.invoke(app, ["validate", "--corpus", "/no/such/corpus.jsonl"])
     assert result.exit_code == 2
     assert "not found" in result.output
+
+
+_SOURCES_QUERY = "capital France Paris Seine river northern"
+_EXPECTED_CHUNK = "doc1::128::0"
+
+
+def test_explain_from_sources_runs(sources_file: Path) -> None:
+    result = runner.invoke(
+        app,
+        ["explain", "capital France", "--from-sources", str(sources_file), "--k", "1"],
+    )
+    assert result.exit_code == 0, result.output
+    assert "explain" in result.output
+
+
+def test_diagnose_from_sources_makes_chunk_size_evaluable(sources_file: Path) -> None:
+    result = runner.invoke(
+        app,
+        [
+            "diagnose",
+            _SOURCES_QUERY,
+            "--expect",
+            _EXPECTED_CHUNK,
+            "--from-sources",
+            str(sources_file),
+            "--chunk-size",
+            "128",
+            "--mode",
+            "bm25",
+            "--k",
+            "1",
+            "--format",
+            "json",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    # Provenance from --from-sources makes the chunk-splitting branch evaluable:
+    # the expected text is recoverable by a larger window.
+    assert payload["failure_class"] == "lost_to_chunking"
+    assert "lost_to_chunking" not in payload["unevaluable"]
+    # The chunk_size axis is now evaluable, not reported unevaluable as it always
+    # was from a pre-chunked corpus.
+    assert "chunk_size" not in payload["evidence"]["fix_unevaluable_axes"]
+
+
+def test_fix_from_sources_finds_chunk_size_fix(sources_file: Path) -> None:
+    result = runner.invoke(
+        app,
+        [
+            "fix",
+            _SOURCES_QUERY,
+            "--expect",
+            _EXPECTED_CHUNK,
+            "--from-sources",
+            str(sources_file),
+            "--chunk-size",
+            "128",
+            "--mode",
+            "bm25",
+            "--k",
+            "1",
+            "--all",
+            "--format",
+            "json",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert "chunk_size" not in payload["unevaluable"]
+    axes = {fix["param"] for fix in payload["all_fixes"]}
+    assert "chunk_size" in axes
+
+
+def test_batch_from_sources_runs(tmp_path: Path, sources_file: Path) -> None:
+    queries = tmp_path / "queries.jsonl"
+    queries.write_text(
+        json.dumps({"query": _SOURCES_QUERY, "expect": _EXPECTED_CHUNK}) + "\n",
+        encoding="utf-8",
+    )
+    result = runner.invoke(
+        app,
+        [
+            "batch",
+            "--queries",
+            str(queries),
+            "--from-sources",
+            str(sources_file),
+            "--chunk-size",
+            "128",
+            "--mode",
+            "bm25",
+            "--k",
+            "1",
+            "--format",
+            "json",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert payload["count"] == 1
+
+
+def test_corpus_and_from_sources_are_mutually_exclusive(
+    corpus_file: Path, sources_file: Path
+) -> None:
+    result = runner.invoke(
+        app,
+        [
+            "diagnose",
+            "Paris",
+            "--expect",
+            "paris",
+            "--corpus",
+            str(corpus_file),
+            "--from-sources",
+            str(sources_file),
+        ],
+    )
+    assert result.exit_code == 2
+    assert "exactly one of --corpus or --from-sources" in result.output
+
+
+def test_neither_corpus_nor_from_sources_is_an_error() -> None:
+    result = runner.invoke(app, ["explain", "Paris"])
+    assert result.exit_code == 2
+    assert "exactly one of --corpus or --from-sources" in result.output
+
+
+def test_from_sources_missing_file_exits_2() -> None:
+    result = runner.invoke(app, ["explain", "Paris", "--from-sources", "/no/such/sources.jsonl"])
+    assert result.exit_code == 2
+    assert "not found" in result.output
+
+
+def test_from_sources_malformed_line_exits_2(tmp_path: Path) -> None:
+    sources = tmp_path / "sources.jsonl"
+    sources.write_text('{"id": "doc1", "text": "ok"}\nnot valid json\n', encoding="utf-8")
+    result = runner.invoke(app, ["explain", "Paris", "--from-sources", str(sources)])
+    assert result.exit_code == 2
+    assert ":2:" in "".join(result.output.split())
 
 
 def test_no_args_shows_help() -> None:
