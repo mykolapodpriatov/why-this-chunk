@@ -28,7 +28,7 @@ from why_this_chunk.batch import (
     run_batch,
 )
 from why_this_chunk.config import RetrievalConfig
-from why_this_chunk.corpus import Corpus
+from why_this_chunk.corpus import Corpus, lint_jsonl
 from why_this_chunk.counterfactual import search_fixes
 from why_this_chunk.embedders import FakeEmbedder
 from why_this_chunk.report import (
@@ -321,6 +321,42 @@ def batch(
     # full diagnosis before the non-zero exit.
     if _gate_tripped(result, fail_on):
         raise typer.Exit(code=_GATE_EXIT_CODE)
+
+
+@app.command()
+def validate(
+    corpus: Path = typer.Option(..., "--corpus", help="Corpus JSON-Lines file to lint."),
+    queries: Path | None = typer.Option(
+        None, "--queries", help="Optional queries JSON-Lines file to lint."
+    ),
+) -> None:
+    """Lint a corpus (and optional queries) file without running retrieval.
+
+    Reports duplicate ids, blank ids/text, and malformed lines with 1-based line
+    numbers, so JSONL problems surface in pre-commit/CI instead of as a mid-run
+    ``ValueError``. Exits ``0`` when clean and ``2`` when any problem is found.
+    """
+    if not corpus.is_file():
+        _err_console.print(f"[red]error:[/red] corpus file not found: {corpus}")
+        raise typer.Exit(code=2)
+    problems: list[str] = list(lint_jsonl(corpus))
+
+    if queries is not None:
+        if not queries.is_file():
+            _err_console.print(f"[red]error:[/red] queries file not found: {queries}")
+            raise typer.Exit(code=2)
+        try:
+            load_queries(queries)
+        except ValueError as exc:
+            problems.append(str(exc))
+
+    if problems:
+        for problem in problems:
+            _err_console.print(f"[red]x[/red] {problem}")
+        noun = "problem" if len(problems) == 1 else "problems"
+        _err_console.print(f"[red]{len(problems)} {noun} found[/red]")
+        raise typer.Exit(code=2)
+    _console.print("[green]ok[/green] no problems found")
 
 
 @app.command()

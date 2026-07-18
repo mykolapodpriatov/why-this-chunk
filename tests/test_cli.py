@@ -511,6 +511,79 @@ def test_batch_missing_queries_file() -> None:
     assert "not found" in result.output
 
 
+def test_validate_clean_corpus(corpus_file: Path) -> None:
+    result = runner.invoke(app, ["validate", "--corpus", str(corpus_file)])
+    assert result.exit_code == 0, result.output
+    assert "no problems found" in result.output
+
+
+def test_validate_clean_corpus_and_queries() -> None:
+    result = runner.invoke(
+        app,
+        [
+            "validate",
+            "--corpus",
+            str(EXAMPLES / "corpus.jsonl"),
+            "--queries",
+            str(EXAMPLES / "queries.jsonl"),
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    assert "no problems found" in result.output
+
+
+def test_validate_duplicate_id_and_bad_queries_line(tmp_path: Path) -> None:
+    corpus = tmp_path / "corpus.jsonl"
+    corpus.write_text(
+        '{"id": "paris", "text": "The capital of France is Paris."}\n'
+        '{"id": "seine", "text": "The Seine is a river in France."}\n'
+        '{"id": "paris", "text": "Paris again, a duplicate id."}\n',
+        encoding="utf-8",
+    )
+    queries = tmp_path / "queries.jsonl"
+    queries.write_text(
+        '{"query": "ok", "expect": "paris"}\nnot valid json\n',
+        encoding="utf-8",
+    )
+    result = runner.invoke(
+        app,
+        ["validate", "--corpus", str(corpus), "--queries", str(queries)],
+    )
+    assert result.exit_code == 2, result.output
+    flat = "".join(result.output.split())
+    # The duplicate id is reported at its line (3), naming the first sighting (1).
+    assert "duplicateid'paris'" in flat
+    assert "firstseenonline1" in flat
+    # The malformed queries line is reported with its 1-based line number (2).
+    assert ":2:" in flat
+
+
+def test_validate_reports_malformed_and_blank_lines(tmp_path: Path) -> None:
+    corpus = tmp_path / "corpus.jsonl"
+    corpus.write_text(
+        '{"id": "ok", "text": "fine"}\n'
+        "not json at all\n"
+        '{"id": "", "text": "blank id here"}\n'
+        '{"id": "empty", "text": "   "}\n'
+        '{"text": "no id key"}\n',
+        encoding="utf-8",
+    )
+    result = runner.invoke(app, ["validate", "--corpus", str(corpus)])
+    assert result.exit_code == 2, result.output
+    flat = "".join(result.output.split())
+    assert ":2:" in flat  # invalid JSON
+    assert "blankchunkid" in flat  # line 3
+    assert "blanktext" in flat  # line 4
+    assert "needs'id'and'text'keys" in flat  # line 5
+    assert "4problemsfound" in flat
+
+
+def test_validate_missing_corpus_file() -> None:
+    result = runner.invoke(app, ["validate", "--corpus", "/no/such/corpus.jsonl"])
+    assert result.exit_code == 2
+    assert "not found" in result.output
+
+
 def test_no_args_shows_help() -> None:
     result = runner.invoke(app, [])
     # no_args_is_help => exit code 0 with usage text.
