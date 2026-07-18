@@ -1,0 +1,8 @@
+{"query": "Python data science", "expect": "numpy"}
+{"query": "Python programming language", "expect": "numpy"}
+{"query": "France river Paris", "expect": "eiffel"}
+{"query": "northern France Paris", "expect": "eiffel"}
+{"query": "light energy chemical plants", "expect": "mitochondria"}
+{"query": "Paris France", "expect": "seine"}
+{"query": "capital of France geography", "expect": "paris"}
+{"query": "a topic that is nowhere in this corpus at all", "expect": "does-not-exist"}

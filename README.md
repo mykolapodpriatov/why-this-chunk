@@ -59,9 +59,14 @@ why-this-chunk diagnose "NumPy fast numerical arrays for Python data science" \
 # Just the fix suggestion(s).
 why-this-chunk fix "NumPy fast numerical arrays for Python data science" \
     --expect python --corpus examples/corpus.jsonl --k 1 --all
+
+# Diagnose a whole file of (query, expected chunk) pairs and aggregate the results.
+why-this-chunk batch --queries examples/queries.jsonl --corpus examples/corpus.jsonl --k 1
 ```
 
-Add `--format md` for Markdown or `--json` for machine-readable output. Pick the retriever with `--mode {bm25,dense,hybrid}` (default `hybrid`). All CLI commands run offline using the deterministic `FakeEmbedder`.
+`batch` reads a queries JSON-Lines file with one `{"query": ..., "expect": ...}` object per line (a sample lives in [`examples/queries.jsonl`](examples/queries.jsonl)), runs the same diagnose + fix path over each row, and prints an aggregate: the count per failure class, the most common suggested fix axis, and a per-query table.
+
+Every command takes `--format {rich,md,json}` (default `rich`) to choose the output shape; `--json` is kept as a deprecated alias for `--format json`. Pick the retriever with `--mode {bm25,dense,hybrid}` (default `hybrid`). All CLI commands run offline using the deterministic `FakeEmbedder`.
 
 ### Library
 
@@ -146,7 +151,7 @@ Beta. The core explainer, taxonomy, counterfactual search, CLI, and a minimal we
 - [x] Score attribution + lexical/dense split for a hybrid retriever
 - [x] Per-query failure taxonomy classifier
 - [x] Counterfactual minimal-config-fix search
-- [x] CLI (`explain` / `diagnose` / `fix`) with rich / Markdown / JSON output
+- [x] CLI (`explain` / `diagnose` / `fix` / `batch`) with rich / Markdown / JSON output
 - [x] Optional local embeddings, cross-encoder rerank, FAISS backend, read-only web inspector
 - [ ] pgvector / Qdrant adapters
 

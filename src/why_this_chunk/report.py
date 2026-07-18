@@ -18,6 +18,8 @@ from typing import Any
 from rich.console import Console
 from rich.table import Table
 
+from why_this_chunk.batch import BatchResult, BatchRow
+from why_this_chunk.counterfactual import CounterfactualResult
 from why_this_chunk.types import (
     ContributionSplit,
     DiagnosisResult,
@@ -26,12 +28,18 @@ from why_this_chunk.types import (
 )
 
 __all__ = [
+    "batch_to_dict",
+    "batch_to_markdown",
     "diagnosis_to_dict",
     "diagnosis_to_markdown",
     "explanation_to_dict",
     "explanation_to_markdown",
+    "fixes_to_dict",
+    "fixes_to_markdown",
+    "render_batch",
     "render_diagnosis",
     "render_explanation",
+    "render_fixes",
 ]
 
 
@@ -104,6 +112,32 @@ def _fix_line(fix: FixSuggestion | None) -> str:
     )
 
 
+def render_fixes(
+    result: CounterfactualResult,
+    console: Console | None = None,
+    *,
+    show_all: bool = False,
+) -> None:
+    """Render a :class:`CounterfactualResult` as rich output to ``console``.
+
+    Prints only the cheapest fix unless ``show_all`` is set, in which case every
+    fix is listed in ``(cost, axis_priority)`` order.
+    """
+    out = console or Console()
+    if result.unevaluable:
+        out.print(f"[dim]unevaluable axes:[/dim] {', '.join(result.unevaluable)}")
+    if result.best is None:
+        out.print("[yellow]no single bounded config change surfaced the chunk[/yellow]")
+        return
+    fixes = result.all_fixes if show_all else [result.best]
+    for suggestion in fixes:
+        out.print(
+            f"[green]{suggestion.param}[/green] {suggestion.from_value!r} -> "
+            f"{suggestion.to_value!r}  (cost={suggestion.cost}, "
+            f"new_rank={suggestion.new_rank})  {suggestion.explanation}"
+        )
+
+
 def explanation_to_markdown(explanation: Explanation) -> str:
     """Return a Markdown rendering of an :class:`Explanation`."""
     lines: list[str] = []
@@ -157,8 +191,38 @@ def diagnosis_to_markdown(diagnosis: DiagnosisResult) -> str:
     return "\n".join(lines) + "\n"
 
 
+def fixes_to_markdown(result: CounterfactualResult, *, show_all: bool = False) -> str:
+    """Return a Markdown rendering of a :class:`CounterfactualResult`."""
+    lines: list[str] = ["## fix", ""]
+    if result.unevaluable:
+        lines.append(f"- unevaluable axes: {', '.join(result.unevaluable)}")
+        lines.append("")
+    if result.best is None:
+        lines.append("- fix: _no single bounded config change surfaced the chunk_")
+        return "\n".join(lines) + "\n"
+    fixes = result.all_fixes if show_all else [result.best]
+    lines.append("| param | from | to | cost | new rank | explanation |")
+    lines.append("| --- | --- | --- | ---: | ---: | --- |")
+    for fix in fixes:
+        explanation = fix.explanation.replace("|", "\\|")
+        lines.append(
+            f"| `{fix.param}` | `{fix.from_value}` | `{fix.to_value}` | "
+            f"{fix.cost} | {fix.new_rank} | {explanation} |"
+        )
+    return "\n".join(lines) + "\n"
+
+
 def _fix_to_dict(fix: FixSuggestion | None) -> dict[str, Any] | None:
     return asdict(fix) if fix is not None else None
+
+
+def fixes_to_dict(result: CounterfactualResult) -> dict[str, Any]:
+    """Return a JSON-serializable dict for a :class:`CounterfactualResult`."""
+    return {
+        "best": _fix_to_dict(result.best),
+        "all_fixes": [asdict(fix) for fix in result.all_fixes],
+        "unevaluable": result.unevaluable,
+    }
 
 
 def explanation_to_dict(explanation: Explanation) -> dict[str, Any]:
@@ -184,6 +248,82 @@ def diagnosis_to_dict(diagnosis: DiagnosisResult) -> dict[str, Any]:
         "unevaluable": [c.value for c in diagnosis.unevaluable],
         "evidence": diagnosis.evidence,
         "fix": _fix_to_dict(diagnosis.fix),
+    }
+
+
+def _counts_summary(counts: dict[str, int]) -> str:
+    if not counts:
+        return "none"
+    return ", ".join(f"{label}={count}" for label, count in counts.items())
+
+
+def _row_failure(row: BatchRow) -> str:
+    return row.failure_class.value if row.failure_class else "none"
+
+
+def _row_fix(row: BatchRow) -> str:
+    if row.fix is None:
+        return "—"
+    return f"{row.fix.param} -> {row.fix.to_value!r} (cost {row.fix.cost})"
+
+
+def render_batch(result: BatchResult, console: Console | None = None) -> None:
+    """Render a :class:`BatchResult` as rich output to ``console``."""
+    out = console or Console()
+    out.rule(f"[bold]batch[/bold] — {len(result.rows)} queries")
+    if not result.rows:
+        out.print("[yellow]no queries to run[/yellow]")
+        return
+    out.print(f"failures: {_counts_summary(result.failure_counts)}")
+    top = result.top_fix_axis if result.top_fix_axis is not None else "n/a"
+    out.print(f"most common fix axis: [green]{top}[/green]")
+
+    table = Table(title="per-query", show_lines=False)
+    table.add_column("query")
+    table.add_column("expect")
+    table.add_column("failure")
+    table.add_column("fix")
+    for row in result.rows:
+        table.add_row(_truncate(row.query, 48), row.expect, _row_failure(row), _row_fix(row))
+    out.print(table)
+
+
+def batch_to_markdown(result: BatchResult) -> str:
+    """Return a Markdown rendering of a :class:`BatchResult`."""
+    lines: list[str] = ["## batch", ""]
+    lines.append(f"- queries: {len(result.rows)}")
+    lines.append(f"- failures: {_counts_summary(result.failure_counts)}")
+    top = result.top_fix_axis if result.top_fix_axis is not None else "n/a"
+    lines.append(f"- most common fix axis: {top}")
+    lines.append("")
+    if not result.rows:
+        lines.append("_no queries to run_")
+        return "\n".join(lines) + "\n"
+    lines.append("| query | expect | failure | fix |")
+    lines.append("| --- | --- | --- | --- |")
+    for row in result.rows:
+        query = _truncate(row.query, 48).replace("|", "\\|")
+        fix = _row_fix(row).replace("|", "\\|")
+        lines.append(f"| {query} | {row.expect} | {_row_failure(row)} | {fix} |")
+    return "\n".join(lines) + "\n"
+
+
+def batch_to_dict(result: BatchResult) -> dict[str, Any]:
+    """Return a JSON-serializable dict for a :class:`BatchResult`."""
+    return {
+        "count": len(result.rows),
+        "failure_counts": result.failure_counts,
+        "fix_axis_counts": result.fix_axis_counts,
+        "top_fix_axis": result.top_fix_axis,
+        "rows": [
+            {
+                "query": row.query,
+                "expect": row.expect,
+                "failure_class": row.failure_class.value if row.failure_class else None,
+                "fix": _fix_to_dict(row.fix),
+            }
+            for row in result.rows
+        ],
     }
 
 
