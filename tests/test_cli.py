@@ -763,7 +763,10 @@ def test_no_args_shows_help() -> None:
 
 
 def test_embedder_and_rerank_choices_in_help() -> None:
-    result = runner.invoke(app, ["explain", "--help"])
+    # Force a wide terminal: rich's help panel truncates long option names with
+    # an ellipsis under a narrow auto-detected width (e.g. headless CI), which
+    # even whitespace-flattening can't recover from.
+    result = runner.invoke(app, ["explain", "--help"], env={"COLUMNS": "200"})
     assert result.exit_code == 0
     assert "--embedder" in result.output
     assert "--rerank" in result.output
