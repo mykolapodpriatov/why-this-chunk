@@ -315,10 +315,12 @@ def explain(
     embedder: EmbedderChoice = typer.Option(
         EmbedderChoice.FAKE,
         "--embedder",
-        help="Embedder backend: fake (offline) or st (sentence-transformers, [st] extra).",
+        help="Embedder backend: fake (offline) or st (sentence-transformers, the 'st' extra).",
     ),
     rerank: bool = typer.Option(
-        False, "--rerank", help="Rerank the candidate pool with a cross-encoder ([st] extra)."
+        False,
+        "--rerank",
+        help="Rerank the candidate pool with a cross-encoder (requires the 'st' extra).",
     ),
     rerank_model: str | None = typer.Option(
         None, "--rerank-model", help="Cross-encoder model id override for --rerank."
@@ -406,10 +408,12 @@ def diagnose(
     embedder: EmbedderChoice = typer.Option(
         EmbedderChoice.FAKE,
         "--embedder",
-        help="Embedder backend: fake (offline) or st (sentence-transformers, [st] extra).",
+        help="Embedder backend: fake (offline) or st (sentence-transformers, the 'st' extra).",
     ),
     rerank: bool = typer.Option(
-        False, "--rerank", help="Rerank the candidate pool with a cross-encoder ([st] extra)."
+        False,
+        "--rerank",
+        help="Rerank the candidate pool with a cross-encoder (requires the 'st' extra).",
     ),
     rerank_model: str | None = typer.Option(
         None, "--rerank-model", help="Cross-encoder model id override for --rerank."
@@ -469,10 +473,12 @@ def fix(
     embedder: EmbedderChoice = typer.Option(
         EmbedderChoice.FAKE,
         "--embedder",
-        help="Embedder backend: fake (offline) or st (sentence-transformers, [st] extra).",
+        help="Embedder backend: fake (offline) or st (sentence-transformers, the 'st' extra).",
     ),
     rerank: bool = typer.Option(
-        False, "--rerank", help="Rerank the candidate pool with a cross-encoder ([st] extra)."
+        False,
+        "--rerank",
+        help="Rerank the candidate pool with a cross-encoder (requires the 'st' extra).",
     ),
     rerank_model: str | None = typer.Option(
         None, "--rerank-model", help="Cross-encoder model id override for --rerank."
@@ -534,10 +540,12 @@ def batch(
     embedder: EmbedderChoice = typer.Option(
         EmbedderChoice.FAKE,
         "--embedder",
-        help="Embedder backend: fake (offline) or st (sentence-transformers, [st] extra).",
+        help="Embedder backend: fake (offline) or st (sentence-transformers, the 'st' extra).",
     ),
     rerank: bool = typer.Option(
-        False, "--rerank", help="Rerank the candidate pool with a cross-encoder ([st] extra)."
+        False,
+        "--rerank",
+        help="Rerank the candidate pool with a cross-encoder (requires the 'st' extra).",
     ),
     rerank_model: str | None = typer.Option(
         None, "--rerank-model", help="Cross-encoder model id override for --rerank."
@@ -629,10 +637,12 @@ def serve(
     embedder: EmbedderChoice = typer.Option(
         EmbedderChoice.FAKE,
         "--embedder",
-        help="Embedder backend: fake (offline) or st (sentence-transformers, [st] extra).",
+        help="Embedder backend: fake (offline) or st (sentence-transformers, the 'st' extra).",
     ),
     rerank: bool = typer.Option(
-        False, "--rerank", help="Rerank the candidate pool with a cross-encoder ([st] extra)."
+        False,
+        "--rerank",
+        help="Rerank the candidate pool with a cross-encoder (requires the 'st' extra).",
     ),
     rerank_model: str | None = typer.Option(
         None, "--rerank-model", help="Cross-encoder model id override for --rerank."

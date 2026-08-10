@@ -7,6 +7,7 @@ import json
 from pathlib import Path
 
 import pytest
+import typer.main
 from typer.testing import CliRunner
 
 from why_this_chunk.cli import app
@@ -762,15 +763,18 @@ def test_no_args_shows_help() -> None:
     assert "Usage" in result.output
 
 
-def test_embedder_and_rerank_choices_in_help() -> None:
-    # Force a wide terminal: rich's help panel truncates long option names with
-    # an ellipsis under a narrow auto-detected width (e.g. headless CI), which
-    # even whitespace-flattening can't recover from.
-    result = runner.invoke(app, ["explain", "--help"], env={"COLUMNS": "200"})
-    assert result.exit_code == 0
-    assert "--embedder" in result.output
-    assert "--rerank" in result.output
-    assert "--rerank-model" in result.output
+def test_embedder_and_rerank_flags_are_registered() -> None:
+    # Inspect the underlying click command's parameters directly rather than
+    # asserting on rendered --help text: rich's help panel wraps/truncates
+    # option names under a narrow auto-detected terminal width (this varies by
+    # environment, e.g. a headless CI runner vs a local tty), which makes
+    # substring-matching the rendered output flaky. Introspection is exact and
+    # environment-independent.
+    explain_cmd = typer.main.get_command(app).commands["explain"]
+    option_flags = {opt for param in explain_cmd.params for opt in getattr(param, "opts", [])}
+    assert "--embedder" in option_flags
+    assert "--rerank" in option_flags
+    assert "--rerank-model" in option_flags
 
 
 def test_embedder_bad_choice_exits_2(corpus_file: Path) -> None:
