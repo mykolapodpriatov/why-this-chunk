@@ -6,10 +6,14 @@ corpus (``--corpus``) or raw ``{id, text}`` source documents chunked on the fly
 provenance, so the ``chunk_size`` counterfactual axis and ``lost_to_chunking``
 check become evaluable from the command line. Retrieval uses the offline
 :class:`~why_this_chunk.embedders.fake.FakeEmbedder` by default, so the CLI runs
-with zero downloads. A single ``--format {rich,md,json}`` switch selects the
-output shape (rich terminal view by default, Markdown, or machine-readable
-JSON). ``--json`` is retained as a hidden, deprecated alias for ``--format
-json``.
+with zero downloads; pass ``--embedder st`` to use the real
+:class:`~why_this_chunk.embedders.sentence_transformers.SentenceTransformerEmbedder`
+and ``--rerank`` (with an optional ``--rerank-model`` override) to wrap the
+retriever in a :class:`~why_this_chunk.rerank.RerankingRetriever`, both gated on
+the ``[st]`` extra with a clear CLI error when it is missing. A single
+``--format {rich,md,json}`` switch selects the output shape (rich terminal view
+by default, Markdown, or machine-readable JSON). ``--json`` is retained as a
+hidden, deprecated alias for ``--format json``.
 """
 
 from __future__ import annotations
@@ -34,7 +38,7 @@ from why_this_chunk.batch import (
 from why_this_chunk.config import RetrievalConfig
 from why_this_chunk.corpus import Corpus, lint_jsonl
 from why_this_chunk.counterfactual import search_fixes
-from why_this_chunk.embedders import FakeEmbedder
+from why_this_chunk.embedders import Embedder, FakeEmbedder
 from why_this_chunk.report import (
     batch_to_dict,
     batch_to_markdown,
@@ -49,6 +53,7 @@ from why_this_chunk.report import (
     render_explanation,
     render_fixes,
 )
+from why_this_chunk.rerank import CrossEncoderReranker, RerankingRetriever
 from why_this_chunk.retrievers import Retriever
 from why_this_chunk.retrievers.bm25 import BM25Retriever
 from why_this_chunk.retrievers.dense import DenseRetriever
@@ -81,6 +86,19 @@ class Granularity(StrEnum):
 
     SENTENCE = "sentence"
     TOKEN = "token"
+
+
+class EmbedderChoice(StrEnum):
+    """Embedder backends selectable via ``--embedder``.
+
+    ``fake`` (the default) is the deterministic, offline
+    :class:`~why_this_chunk.embedders.fake.FakeEmbedder`. ``st`` is the real
+    :class:`~why_this_chunk.embedders.sentence_transformers.SentenceTransformerEmbedder`,
+    gated on the ``[st]`` extra.
+    """
+
+    FAKE = "fake"
+    ST = "st"
 
 
 class OutputFormat(StrEnum):
@@ -209,6 +227,40 @@ def _resolve_corpus(
     return _load_corpus(corpus), None
 
 
+def _build_embedder(choice: EmbedderChoice, seed: int) -> Embedder:
+    """Construct the embedder selected by ``--embedder``.
+
+    Raises:
+        typer.Exit: With a clear message (not a raw traceback) when ``st`` is
+            selected but the ``[st]`` extra is not installed.
+    """
+    if choice is EmbedderChoice.FAKE:
+        return FakeEmbedder(seed=seed)
+    from why_this_chunk.embedders.sentence_transformers import SentenceTransformerEmbedder
+
+    try:
+        return SentenceTransformerEmbedder()
+    except ImportError as exc:
+        _err_console.print(f"[red]error:[/red] {exc}")
+        raise typer.Exit(code=2) from exc
+
+
+def _build_reranker(model_name: str | None) -> CrossEncoderReranker:
+    """Construct the cross-encoder reranker used by ``--rerank``.
+
+    Raises:
+        typer.Exit: With a clear message (not a raw traceback) when the
+            ``[st]`` extra is not installed.
+    """
+    try:
+        if model_name is None:
+            return CrossEncoderReranker()
+        return CrossEncoderReranker(model_name=model_name)
+    except ImportError as exc:
+        _err_console.print(f"[red]error:[/red] {exc}")
+        raise typer.Exit(code=2) from exc
+
+
 def _build_retriever(
     corpus: Corpus,
     mode: Mode,
@@ -216,15 +268,24 @@ def _build_retriever(
     seed: int,
     chunker: Chunker | None = None,
     config: RetrievalConfig | None = None,
+    embedder_choice: EmbedderChoice = EmbedderChoice.FAKE,
+    rerank: bool = False,
+    rerank_model: str | None = None,
 ) -> Retriever:
+    retriever: Retriever
     if mode is Mode.BM25:
-        return BM25Retriever(corpus, chunker=chunker, config=config)
-    embedder = FakeEmbedder(seed=seed)
-    if mode is Mode.DENSE:
-        return DenseRetriever(corpus, embedder, chunker=chunker, config=config)
-    dense = DenseRetriever(corpus, embedder, chunker=chunker, config=config)
-    lexical = BM25Retriever(corpus, chunker=chunker, config=config)
-    return HybridRetriever(dense, lexical, alpha=alpha)
+        retriever = BM25Retriever(corpus, chunker=chunker, config=config)
+    else:
+        embedder = _build_embedder(embedder_choice, seed)
+        dense = DenseRetriever(corpus, embedder, chunker=chunker, config=config)
+        if mode is Mode.DENSE:
+            retriever = dense
+        else:
+            lexical = BM25Retriever(corpus, chunker=chunker, config=config)
+            retriever = HybridRetriever(dense, lexical, alpha=alpha)
+    if rerank:
+        retriever = RerankingRetriever(retriever, _build_reranker(rerank_model))
+    return retriever
 
 
 @app.command()
@@ -251,6 +312,17 @@ def explain(
     mode: Mode = typer.Option(Mode.HYBRID, "--mode", help="Retriever mode."),
     alpha: float = typer.Option(0.5, "--alpha", min=0.0, max=1.0, help="Hybrid alpha."),
     seed: int = typer.Option(0, "--seed", help="FakeEmbedder seed (determinism)."),
+    embedder: EmbedderChoice = typer.Option(
+        EmbedderChoice.FAKE,
+        "--embedder",
+        help="Embedder backend: fake (offline) or st (sentence-transformers, [st] extra).",
+    ),
+    rerank: bool = typer.Option(
+        False, "--rerank", help="Rerank the candidate pool with a cross-encoder ([st] extra)."
+    ),
+    rerank_model: str | None = typer.Option(
+        None, "--rerank-model", help="Cross-encoder model id override for --rerank."
+    ),
     output_format: OutputFormat = typer.Option(
         OutputFormat.RICH, "--format", help="Output shape: rich, md, or json."
     ),
@@ -262,9 +334,14 @@ def explain(
     fmt = _resolve_format(output_format, as_json)
     loaded, chunker = _resolve_corpus(corpus, from_sources, chunk_size, overlap)
     config = RetrievalConfig(
-        top_k=k, chunk_size=chunk_size, alpha=alpha if mode is Mode.HYBRID else None
+        top_k=k,
+        chunk_size=chunk_size,
+        alpha=alpha if mode is Mode.HYBRID else None,
+        rerank=rerank,
     )
-    retriever = _build_retriever(loaded, mode, alpha, seed, chunker, config)
+    retriever = _build_retriever(
+        loaded, mode, alpha, seed, chunker, config, embedder, rerank, rerank_model
+    )
     results = retriever.search(query, k)
     explanations = [
         explain_chunk(retriever, query, result, granularity.value) for result in results
@@ -326,6 +403,17 @@ def diagnose(
     mode: Mode = typer.Option(Mode.HYBRID, "--mode", help="Retriever mode."),
     alpha: float = typer.Option(0.5, "--alpha", min=0.0, max=1.0, help="Hybrid alpha."),
     seed: int = typer.Option(0, "--seed", help="FakeEmbedder seed (determinism)."),
+    embedder: EmbedderChoice = typer.Option(
+        EmbedderChoice.FAKE,
+        "--embedder",
+        help="Embedder backend: fake (offline) or st (sentence-transformers, [st] extra).",
+    ),
+    rerank: bool = typer.Option(
+        False, "--rerank", help="Rerank the candidate pool with a cross-encoder ([st] extra)."
+    ),
+    rerank_model: str | None = typer.Option(
+        None, "--rerank-model", help="Cross-encoder model id override for --rerank."
+    ),
     output_format: OutputFormat = typer.Option(
         OutputFormat.RICH, "--format", help="Output shape: rich, md, or json."
     ),
@@ -337,9 +425,14 @@ def diagnose(
     fmt = _resolve_format(output_format, as_json)
     loaded, chunker = _resolve_corpus(corpus, from_sources, chunk_size, overlap)
     config = RetrievalConfig(
-        top_k=k, chunk_size=chunk_size, alpha=alpha if mode is Mode.HYBRID else None
+        top_k=k,
+        chunk_size=chunk_size,
+        alpha=alpha if mode is Mode.HYBRID else None,
+        rerank=rerank,
     )
-    retriever = _build_retriever(loaded, mode, alpha, seed, chunker, config)
+    retriever = _build_retriever(
+        loaded, mode, alpha, seed, chunker, config, embedder, rerank, rerank_model
+    )
     result = _diagnose_with_fix(retriever, query, expect, config)
 
     if fmt is OutputFormat.JSON:
@@ -373,6 +466,17 @@ def fix(
     mode: Mode = typer.Option(Mode.HYBRID, "--mode", help="Retriever mode."),
     alpha: float = typer.Option(0.5, "--alpha", min=0.0, max=1.0, help="Hybrid alpha."),
     seed: int = typer.Option(0, "--seed", help="FakeEmbedder seed (determinism)."),
+    embedder: EmbedderChoice = typer.Option(
+        EmbedderChoice.FAKE,
+        "--embedder",
+        help="Embedder backend: fake (offline) or st (sentence-transformers, [st] extra).",
+    ),
+    rerank: bool = typer.Option(
+        False, "--rerank", help="Rerank the candidate pool with a cross-encoder ([st] extra)."
+    ),
+    rerank_model: str | None = typer.Option(
+        None, "--rerank-model", help="Cross-encoder model id override for --rerank."
+    ),
     show_all: bool = typer.Option(False, "--all", help="Show every fix, ranked."),
     output_format: OutputFormat = typer.Option(
         OutputFormat.RICH, "--format", help="Output shape: rich, md, or json."
@@ -385,9 +489,14 @@ def fix(
     fmt = _resolve_format(output_format, as_json)
     loaded, chunker = _resolve_corpus(corpus, from_sources, chunk_size, overlap)
     config = RetrievalConfig(
-        top_k=k, chunk_size=chunk_size, alpha=alpha if mode is Mode.HYBRID else None
+        top_k=k,
+        chunk_size=chunk_size,
+        alpha=alpha if mode is Mode.HYBRID else None,
+        rerank=rerank,
     )
-    retriever = _build_retriever(loaded, mode, alpha, seed, chunker, config)
+    retriever = _build_retriever(
+        loaded, mode, alpha, seed, chunker, config, embedder, rerank, rerank_model
+    )
     result = search_fixes(retriever, query, expect, config)
 
     if fmt is OutputFormat.JSON:
@@ -422,6 +531,17 @@ def batch(
     mode: Mode = typer.Option(Mode.HYBRID, "--mode", help="Retriever mode."),
     alpha: float = typer.Option(0.5, "--alpha", min=0.0, max=1.0, help="Hybrid alpha."),
     seed: int = typer.Option(0, "--seed", help="FakeEmbedder seed (determinism)."),
+    embedder: EmbedderChoice = typer.Option(
+        EmbedderChoice.FAKE,
+        "--embedder",
+        help="Embedder backend: fake (offline) or st (sentence-transformers, [st] extra).",
+    ),
+    rerank: bool = typer.Option(
+        False, "--rerank", help="Rerank the candidate pool with a cross-encoder ([st] extra)."
+    ),
+    rerank_model: str | None = typer.Option(
+        None, "--rerank-model", help="Cross-encoder model id override for --rerank."
+    ),
     output_format: OutputFormat = typer.Option(
         OutputFormat.RICH, "--format", help="Output shape: rich, md, or json."
     ),
@@ -439,9 +559,14 @@ def batch(
     batch_queries = _load_queries(queries)
     loaded, chunker = _resolve_corpus(corpus, from_sources, chunk_size, overlap)
     config = RetrievalConfig(
-        top_k=k, chunk_size=chunk_size, alpha=alpha if mode is Mode.HYBRID else None
+        top_k=k,
+        chunk_size=chunk_size,
+        alpha=alpha if mode is Mode.HYBRID else None,
+        rerank=rerank,
     )
-    retriever = _build_retriever(loaded, mode, alpha, seed, chunker, config)
+    retriever = _build_retriever(
+        loaded, mode, alpha, seed, chunker, config, embedder, rerank, rerank_model
+    )
     result = run_batch(retriever, batch_queries, config)
 
     if fmt is OutputFormat.JSON:
@@ -501,6 +626,17 @@ def serve(
     mode: Mode = typer.Option(Mode.HYBRID, "--mode", help="Retriever mode."),
     alpha: float = typer.Option(0.5, "--alpha", min=0.0, max=1.0, help="Hybrid alpha."),
     seed: int = typer.Option(0, "--seed", help="FakeEmbedder seed (determinism)."),
+    embedder: EmbedderChoice = typer.Option(
+        EmbedderChoice.FAKE,
+        "--embedder",
+        help="Embedder backend: fake (offline) or st (sentence-transformers, [st] extra).",
+    ),
+    rerank: bool = typer.Option(
+        False, "--rerank", help="Rerank the candidate pool with a cross-encoder ([st] extra)."
+    ),
+    rerank_model: str | None = typer.Option(
+        None, "--rerank-model", help="Cross-encoder model id override for --rerank."
+    ),
 ) -> None:
     """Launch the optional read-only FastAPI inspector (requires the [web] extra)."""
     try:
@@ -515,7 +651,15 @@ def serve(
         raise typer.Exit(code=2) from exc
 
     loaded = _load_corpus(corpus)
-    retriever = _build_retriever(loaded, mode, alpha, seed)
+    retriever = _build_retriever(
+        loaded,
+        mode,
+        alpha,
+        seed,
+        embedder_choice=embedder,
+        rerank=rerank,
+        rerank_model=rerank_model,
+    )
     web_app = create_app(retriever)
     uvicorn.run(web_app, host=host, port=port, log_level="info")
 
