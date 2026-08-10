@@ -62,22 +62,33 @@ why-this-chunk fix "NumPy fast numerical arrays for Python data science" \
 
 # Diagnose a whole file of (query, expected chunk) pairs and aggregate the results.
 why-this-chunk batch --queries examples/queries.jsonl --corpus examples/corpus.jsonl --k 1
+
+# Use real local embeddings and cross-encoder reranking (requires the [st] extra).
+why-this-chunk diagnose "NumPy fast numerical arrays for Python data science" \
+    --expect python --corpus examples/corpus.jsonl --k 1 --embedder st --rerank
 ```
 
 `batch` reads a queries JSON-Lines file with one `{"query": ..., "expect": ...}` object per line (a sample lives in [`examples/queries.jsonl`](examples/queries.jsonl)), runs the same diagnose + fix path over each row, and prints an aggregate: the count per failure class, the most common suggested fix axis, and a per-query table.
 
-Every command takes `--format {rich,md,json}` (default `rich`) to choose the output shape; `--json` is kept as a deprecated alias for `--format json`. Pick the retriever with `--mode {bm25,dense,hybrid}` (default `hybrid`). All CLI commands run offline using the deterministic `FakeEmbedder`.
+Every command takes `--format {rich,md,json}` (default `rich`) to choose the output shape; `--json` is kept as a deprecated alias for `--format json`. Pick the retriever with `--mode {bm25,dense,hybrid}` (default `hybrid`). All CLI commands run offline by default using the deterministic `FakeEmbedder`; pass `--embedder st` for the real `SentenceTransformerEmbedder` and `--rerank` (with an optional `--rerank-model` override) to rerank the candidate pool with a cross-encoder — both require the `[st]` extra and fail with a clear error if it isn't installed.
 
 ### Library
 
 ```python
 from why_this_chunk import (
-    Corpus, FakeEmbedder, BM25Retriever, DenseRetriever, HybridRetriever,
-    RetrievalConfig, explain_chunk, diagnose, search_fixes,
+    Corpus,
+    FakeEmbedder,
+    BM25Retriever,
+    DenseRetriever,
+    HybridRetriever,
+    RetrievalConfig,
+    explain_chunk,
+    diagnose,
+    search_fixes,
 )
 
 corpus = Corpus.from_jsonl("examples/corpus.jsonl")
-embedder = FakeEmbedder(seed=0)               # deterministic, offline
+embedder = FakeEmbedder(seed=0)  # deterministic, offline
 retriever = HybridRetriever(
     DenseRetriever(corpus, embedder),
     BM25Retriever(corpus),
@@ -88,14 +99,14 @@ retriever = HybridRetriever(
 top = retriever.search("What is the capital of France?", k=1)[0]
 explanation = explain_chunk(retriever, "What is the capital of France?", top)
 print(explanation.sentences[0].sentence, explanation.sentences[0].share)
-print(explanation.split.dominant)            # "dense" or "lexical"
+print(explanation.split.dominant)  # "dense" or "lexical"
 
 # Diagnose a failure and find the cheapest fix.
 config = RetrievalConfig(top_k=1, alpha=0.5)
 query = "NumPy fast numerical arrays for Python data science"
 result = diagnose(retriever, query, "python", config)
-print(result.failure_class)                  # e.g. FailureClass.OUT_RANKED
-print(search_fixes(retriever, query, "python", config).best)   # e.g. raise top_k to 2
+print(result.failure_class)  # e.g. FailureClass.OUT_RANKED
+print(search_fixes(retriever, query, "python", config).best)  # e.g. raise top_k to 2
 ```
 
 To make the `chunk_size` axis and `lost_to_chunking` check evaluable, build the corpus with provenance from raw documents:

@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import importlib.util
 import json
 from pathlib import Path
 
 import pytest
+import typer.main
 from typer.testing import CliRunner
 
 from why_this_chunk.cli import app
@@ -14,6 +16,12 @@ runner = CliRunner()
 
 #: The bundled example corpus/queries, used to pin deterministic batch aggregates.
 EXAMPLES = Path(__file__).resolve().parent.parent / "examples"
+
+#: Whether the optional 'st' extra (sentence-transformers) is installed; the
+#: real --embedder st / --rerank paths only run when it is, mirroring
+#: tests/test_optional.py's pattern so the suite stays green on a minimal
+#: install (which is what CI installs).
+_HAS_ST = importlib.util.find_spec("sentence_transformers") is not None
 
 
 @pytest.fixture
@@ -753,3 +761,184 @@ def test_no_args_shows_help() -> None:
     result = runner.invoke(app, [])
     # no_args_is_help => exit code 0 with usage text.
     assert "Usage" in result.output
+
+
+def test_embedder_and_rerank_flags_are_registered() -> None:
+    # Inspect the underlying click command's parameters directly rather than
+    # asserting on rendered --help text: rich's help panel wraps/truncates
+    # option names under a narrow auto-detected terminal width (this varies by
+    # environment, e.g. a headless CI runner vs a local tty), which makes
+    # substring-matching the rendered output flaky. Introspection is exact and
+    # environment-independent.
+    explain_cmd = typer.main.get_command(app).commands["explain"]
+    option_flags = {opt for param in explain_cmd.params for opt in getattr(param, "opts", [])}
+    assert "--embedder" in option_flags
+    assert "--rerank" in option_flags
+    assert "--rerank-model" in option_flags
+
+
+def test_embedder_bad_choice_exits_2(corpus_file: Path) -> None:
+    result = runner.invoke(
+        app,
+        ["explain", "Paris", "--corpus", str(corpus_file), "--embedder", "bogus"],
+    )
+    assert result.exit_code == 2
+    assert "fake" in result.output
+    assert "st" in result.output
+
+
+def test_embedder_st_bm25_mode_does_not_require_extra(corpus_file: Path) -> None:
+    # BM25 never touches the embedder, so --embedder st must not force a
+    # sentence-transformers import (let alone a download) in bm25 mode.
+    result = runner.invoke(
+        app,
+        [
+            "explain",
+            "Paris France",
+            "--corpus",
+            str(corpus_file),
+            "--mode",
+            "bm25",
+            "--embedder",
+            "st",
+            "--k",
+            "1",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+
+
+def test_diagnose_rerank_axis_unevaluable_without_flag(corpus_file: Path) -> None:
+    # Without --rerank the retriever is never wrapped in RerankingRetriever, so
+    # the counterfactual rerank axis stays unevaluable, as it always has.
+    result = runner.invoke(
+        app,
+        [
+            "diagnose",
+            "Paris France",
+            "--expect",
+            "seine",
+            "--corpus",
+            str(corpus_file),
+            "--k",
+            "1",
+            "--format",
+            "json",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert "rerank" in payload["evidence"]["fix_unevaluable_axes"]
+
+
+@pytest.mark.skipif(_HAS_ST, reason="runs only when the st extra is absent")
+def test_embedder_st_without_extra_gives_clean_error(corpus_file: Path) -> None:
+    result = runner.invoke(
+        app,
+        [
+            "explain",
+            "Paris",
+            "--corpus",
+            str(corpus_file),
+            "--mode",
+            "dense",
+            "--embedder",
+            "st",
+        ],
+    )
+    assert result.exit_code == 2, result.output
+    assert "st" in result.output
+    assert "pip install" in result.output
+
+
+@pytest.mark.skipif(_HAS_ST, reason="runs only when the st extra is absent")
+def test_rerank_without_extra_gives_clean_error(corpus_file: Path) -> None:
+    result = runner.invoke(
+        app,
+        ["explain", "Paris", "--corpus", str(corpus_file), "--rerank"],
+    )
+    assert result.exit_code == 2, result.output
+    assert "st" in result.output
+    assert "pip install" in result.output
+
+
+def test_embedder_st_choice_is_wired_through(
+    corpus_file: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """--embedder st reaches _build_embedder with the 'st' choice.
+
+    Verified fully offline (no real sentence-transformers download, and no
+    dependency on the [st] extra being installed) by stubbing the internal
+    embedder builder and asserting it was invoked with the right choice — the
+    thing issue #9 says never happened.
+    """
+    from why_this_chunk import cli as cli_module
+
+    calls: list[cli_module.EmbedderChoice] = []
+
+    def _fake_build_embedder(
+        choice: cli_module.EmbedderChoice, seed: int
+    ) -> cli_module.FakeEmbedder:
+        calls.append(choice)
+        return cli_module.FakeEmbedder(seed=seed)
+
+    monkeypatch.setattr(cli_module, "_build_embedder", _fake_build_embedder)
+
+    result = runner.invoke(
+        app,
+        [
+            "explain",
+            "Paris France",
+            "--corpus",
+            str(corpus_file),
+            "--mode",
+            "dense",
+            "--embedder",
+            "st",
+            "--k",
+            "1",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    assert calls == [cli_module.EmbedderChoice.ST]
+
+
+def test_rerank_flag_wires_reranking_retriever(
+    corpus_file: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """--rerank wraps the retriever in RerankingRetriever end-to-end.
+
+    Verified with a fake reranker (stubbing the internal reranker builder) so
+    the test stays offline and deterministic while still exercising the real
+    RetrievalConfig(rerank=True) + RerankingRetriever wiring that makes the
+    counterfactual rerank axis evaluable through the CLI.
+    """
+    from why_this_chunk import cli as cli_module
+
+    class _FakeReranker:
+        def score(self, query: str, texts: list[str]) -> list[float]:
+            return [1.0] * len(texts)
+
+    monkeypatch.setattr(cli_module, "_build_reranker", lambda model_name: _FakeReranker())
+
+    result = runner.invoke(
+        app,
+        [
+            "diagnose",
+            "Paris France",
+            "--expect",
+            "seine",
+            "--corpus",
+            str(corpus_file),
+            "--k",
+            "1",
+            "--mode",
+            "bm25",
+            "--rerank",
+            "--format",
+            "json",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert "rerank" not in payload["evidence"].get("fix_unevaluable_axes", [])
