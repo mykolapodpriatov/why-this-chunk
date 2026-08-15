@@ -130,7 +130,11 @@ def create_app(retriever: Retriever) -> FastAPI:
 
     @api.get("/api/health")
     def health() -> dict[str, Any]:
-        return {"status": "ok", "corpus_size": retriever.corpus_size}
+        payload: dict[str, Any] = {"status": "ok", "corpus_size": retriever.corpus_size}
+        backend = getattr(retriever, "backend", None)
+        if isinstance(backend, str):
+            payload["backend"] = backend
+        return payload
 
     @api.get("/api/explain")
     def explain(
@@ -141,6 +145,10 @@ def create_app(retriever: Retriever) -> FastAPI:
         explanations = [
             explanation_to_dict(explain_chunk(retriever, query, result)) for result in results
         ]
-        return {"query": query, "explanations": explanations}
+        payload: dict[str, Any] = {"query": query, "explanations": explanations}
+        backend = getattr(retriever, "backend", None)
+        if isinstance(backend, str):
+            payload["backend"] = backend
+        return payload
 
     return api

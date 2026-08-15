@@ -98,6 +98,11 @@ class HybridRetriever:
         """Reindex is supported (handles the ``alpha`` and ``chunk_size`` axes)."""
         return True
 
+    @property
+    def backend(self) -> str:
+        """The dense modality's index backend (``faiss`` or ``numpy``)."""
+        return self._dense.backend
+
     def _combined(
         self, query: str
     ) -> tuple[NDArray[np.float64], NDArray[np.float64], NDArray[np.float64], NDArray[np.float64]]:
