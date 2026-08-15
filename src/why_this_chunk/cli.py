@@ -137,6 +137,20 @@ def _gate_tripped(result: BatchResult, fail_on: FailOn) -> bool:
     return False
 
 
+def _write_out(path: Path, payload: str) -> None:
+    """Write ``payload`` to ``path``, creating parent directories.
+
+    Raises:
+        typer.Exit: With a clear message when the path is not writable.
+    """
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(payload, encoding="utf-8")
+    except OSError as exc:
+        _err_console.print(f"[red]error:[/red] cannot write --out {path}: {exc}")
+        raise typer.Exit(code=2) from exc
+
+
 def _resolve_format(output_format: OutputFormat, as_json: bool) -> OutputFormat:
     """Fold the hidden ``--json`` back-compat alias onto ``--format json``.
 
@@ -792,6 +806,14 @@ def batch(
         "--fail-on",
         help="CI gate: exit non-zero on any 'failure' or on an 'unfixable' one.",
     ),
+    out: Path | None = typer.Option(
+        None,
+        "--out",
+        help=(
+            "Write the report to PATH (creates parent dirs). Uses --format; "
+            "when --format is rich the file is JSON so it is a usable CI artifact."
+        ),
+    ),
     as_json: bool = typer.Option(
         False, "--json", hidden=True, help="Deprecated alias for --format json."
     ),
@@ -821,16 +843,27 @@ def batch(
     )
     result = run_batch(retriever, batch_queries, config)
 
+    json_payload = batch_to_dict(result)
+    json_payload["backend"] = _backend_of(retriever)
+    json_text = json_module.dumps(json_payload, indent=2) + "\n"
+    md_text = batch_to_markdown(result)
+
     if fmt is OutputFormat.JSON:
-        payload = batch_to_dict(result)
-        payload["backend"] = _backend_of(retriever)
-        _console.print_json(json_module.dumps(payload))
+        _console.print_json(json_module.dumps(json_payload))
     else:
         _print_backend(fmt, retriever)
         if fmt is OutputFormat.MD:
-            sys.stdout.write(batch_to_markdown(result))
+            sys.stdout.write(md_text)
         else:
             render_batch(result, _console)
+
+    # Persist the artifact before the CI gate so --fail-on still leaves the file.
+    if out is not None:
+        if fmt is OutputFormat.MD:
+            _write_out(out, md_text)
+        else:
+            # json explicitly, or rich default → JSON artifact + rich stdout.
+            _write_out(out, json_text)
 
     # Report the results first, then trip the CI gate so pipelines still see the
     # full diagnosis before the non-zero exit.
