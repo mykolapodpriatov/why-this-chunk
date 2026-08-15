@@ -62,7 +62,7 @@ from why_this_chunk.retrievers.dense import DenseRetriever
 from why_this_chunk.retrievers.hybrid import HybridRetriever
 from why_this_chunk.source import Chunker, FixedSizeChunker, SourceDocument
 from why_this_chunk.taxonomy import diagnose as run_diagnose
-from why_this_chunk.types import DiagnosisResult
+from why_this_chunk.types import Chunk, DiagnosisResult
 
 app = typer.Typer(
     help="Explain why a chunk ranked where it did, diagnose failures, and find "
@@ -166,6 +166,132 @@ def _load_queries(queries_path: Path) -> list[BatchQuery]:
     except ValueError as exc:
         _err_console.print(f"[red]error:[/red] {exc}")
         raise typer.Exit(code=2) from exc
+
+
+def _chunk_ids(chunks: list[Chunk]) -> str:
+    if not chunks:
+        return "(none)"
+    limit = 12
+    ids = [chunk.id for chunk in chunks]
+    shown = ", ".join(ids[:limit])
+    extra = len(ids) - limit
+    if extra > 0:
+        return f"{shown}, … +{extra} more"
+    return shown
+
+
+def _metadata_hits(corpus: Corpus, needle: str) -> list[Chunk]:
+    """Chunks whose ``source_document_id`` or a metadata value equals ``needle``."""
+    hits: list[Chunk] = []
+    for chunk in corpus:
+        if chunk.source_document_id == needle:
+            hits.append(chunk)
+            continue
+        if any(str(value) == needle for value in chunk.metadata.values()):
+            hits.append(chunk)
+    return hits
+
+
+def _text_hits(corpus: Corpus, needle: str) -> list[Chunk]:
+    """Chunks whose text contains ``needle`` (case-insensitive)."""
+    lowered = needle.casefold()
+    return [chunk for chunk in corpus if lowered in chunk.text.casefold()]
+
+
+def _expect_usage_error(message: str) -> None:
+    _err_console.print(f"[red]error:[/red] {message}")
+    raise typer.Exit(code=2)
+
+
+def _resolve_expect(
+    corpus: Corpus,
+    expect: str | None,
+    *,
+    expect_text: str | None = None,
+    expect_meta: str | None = None,
+    origin: str = "--expect",
+) -> str:
+    """Resolve an expected-chunk locator to a corpus id.
+
+    Cascade for ``--expect`` / a batch ``expect`` field: exact id, then a unique
+    metadata value (or ``source_document_id``), then a unique case-insensitive
+    text substring. Ambiguous hits are a usage error listing candidate ids. A
+    locator that matches nothing is passed through as an absent id so diagnose
+    still reports ``missing_from_index``.
+
+    ``expect_text`` / ``expect_meta`` are explicit alternatives: zero or many
+    hits are always usage errors (never a silent taxonomy label).
+    """
+    provided = [
+        name
+        for name, value in (
+            ("expect", expect),
+            ("expect_text", expect_text),
+            ("expect_meta", expect_meta),
+        )
+        if value is not None
+    ]
+    if len(provided) != 1:
+        _expect_usage_error(f"{origin} needs exactly one of expect / expect_text / expect_meta")
+
+    if expect_text is not None:
+        needle = expect_text.strip()
+        if not needle:
+            _expect_usage_error(f"{origin} expect_text is empty")
+        hits = _text_hits(corpus, needle)
+        if len(hits) != 1:
+            _expect_usage_error(
+                f"{origin} expect_text {needle!r} matched {len(hits)} chunks: {_chunk_ids(hits)}"
+            )
+        return hits[0].id
+
+    if expect_meta is not None:
+        needle = expect_meta.strip()
+        if not needle:
+            _expect_usage_error(f"{origin} expect_meta is empty")
+        hits = _metadata_hits(corpus, needle)
+        if len(hits) != 1:
+            _expect_usage_error(
+                f"{origin} expect_meta {needle!r} matched {len(hits)} chunks: {_chunk_ids(hits)}"
+            )
+        return hits[0].id
+
+    assert expect is not None
+    needle = expect.strip()
+    if not needle:
+        _expect_usage_error(f"{origin} is empty")
+    if corpus.contains(needle):
+        return needle
+    meta = _metadata_hits(corpus, needle)
+    if len(meta) == 1:
+        return meta[0].id
+    if len(meta) > 1:
+        _expect_usage_error(
+            f"{origin} {needle!r} matches {len(meta)} chunks by metadata: {_chunk_ids(meta)}"
+        )
+    text = _text_hits(corpus, needle)
+    if len(text) == 1:
+        return text[0].id
+    if len(text) > 1:
+        _expect_usage_error(
+            f"{origin} {needle!r} matches {len(text)} chunks by text: {_chunk_ids(text)}"
+        )
+    return needle
+
+
+def _resolve_batch_queries(corpus: Corpus, queries: list[BatchQuery]) -> list[BatchQuery]:
+    """Resolve each batch row's expect / expect_text / expect_meta to a chunk id."""
+    resolved: list[BatchQuery] = []
+    for index, query in enumerate(queries, start=1):
+        chunk_id = _resolve_expect(
+            corpus,
+            query.expect,
+            expect_text=query.expect_text,
+            expect_meta=query.expect_meta,
+            origin=f"queries:{index}",
+        )
+        resolved.append(BatchQuery(query=query.query, expect=chunk_id))
+    return resolved
 
 
 def _load_sources(sources_path: Path) -> list[SourceDocument]:
@@ -443,7 +569,11 @@ def _diagnose_with_fix(
 @app.command()
 def diagnose(
     query: str = typer.Argument(..., help="The failing query."),
-    expect: str = typer.Option(..., "--expect", help="Id of the known-correct chunk."),
+    expect: str = typer.Option(
+        ...,
+        "--expect",
+        help="Known-correct chunk: exact id, unique metadata value, or unique text substring.",
+    ),
     corpus: Path | None = typer.Option(
         None, "--corpus", help="Path to a pre-chunked JSON-Lines corpus."
     ),
@@ -490,6 +620,7 @@ def diagnose(
     """Classify why an expected chunk failed and report the minimal fix."""
     fmt = _resolve_format(output_format, as_json)
     loaded, chunker = _resolve_corpus(corpus, from_sources, chunk_size, overlap)
+    expect = _resolve_expect(loaded, expect)
     config = RetrievalConfig(
         top_k=k,
         chunk_size=chunk_size,
@@ -525,7 +656,11 @@ def diagnose(
 @app.command()
 def fix(
     query: str = typer.Argument(..., help="The failing query."),
-    expect: str = typer.Option(..., "--expect", help="Id of the known-correct chunk."),
+    expect: str = typer.Option(
+        ...,
+        "--expect",
+        help="Known-correct chunk: exact id, unique metadata value, or unique text substring.",
+    ),
     corpus: Path | None = typer.Option(
         None, "--corpus", help="Path to a pre-chunked JSON-Lines corpus."
     ),
@@ -573,6 +708,7 @@ def fix(
     """Report the single cheapest config change (or all of them with --all)."""
     fmt = _resolve_format(output_format, as_json)
     loaded, chunker = _resolve_corpus(corpus, from_sources, chunk_size, overlap)
+    expect = _resolve_expect(loaded, expect)
     config = RetrievalConfig(
         top_k=k,
         chunk_size=chunk_size,
@@ -608,7 +744,9 @@ def fix(
 @app.command()
 def batch(
     queries: Path = typer.Option(
-        ..., "--queries", help="JSON-Lines file of {'query', 'expect'} rows."
+        ...,
+        "--queries",
+        help="JSON-Lines file of {query, expect|expect_text|expect_meta} rows.",
     ),
     corpus: Path | None = typer.Option(
         None, "--corpus", help="Path to a pre-chunked JSON-Lines corpus."
@@ -662,6 +800,7 @@ def batch(
     fmt = _resolve_format(output_format, as_json)
     batch_queries = _load_queries(queries)
     loaded, chunker = _resolve_corpus(corpus, from_sources, chunk_size, overlap)
+    batch_queries = _resolve_batch_queries(loaded, batch_queries)
     config = RetrievalConfig(
         top_k=k,
         chunk_size=chunk_size,

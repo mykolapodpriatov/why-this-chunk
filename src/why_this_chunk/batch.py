@@ -2,8 +2,10 @@
 
 Reads ``{"query": ..., "expect": ...}`` records — one per line — and runs the
 same per-query path the ``diagnose`` command uses (the failure taxonomy plus the
-counterfactual minimal-fix search) for each row. The rows are then aggregated
-into a :class:`BatchResult`: how many queries fell into each
+counterfactual minimal-fix search) for each row. A row may carry ``expect_text``
+or ``expect_meta`` instead of ``expect``; the CLI resolves those locators to a
+chunk id before diagnosis. The rows are then aggregated into a
+:class:`BatchResult`: how many queries fell into each
 :class:`~why_this_chunk.types.FailureClass`, how often each fix axis was the
 cheapest suggestion, and the single most common suggested fix axis.
 
@@ -44,10 +46,16 @@ NO_FAILURE_LABEL = "none"
 
 @dataclass(frozen=True, slots=True)
 class BatchQuery:
-    """One ``(query, expected_chunk_id)`` pair read from the queries file."""
+    """One query plus an expected-chunk locator read from the queries file.
+
+    Exactly one of ``expect``, ``expect_text``, or ``expect_meta`` is set on a
+    row as loaded from JSONL. After CLI resolution, ``expect`` is the chunk id.
+    """
 
     query: str
-    expect: str
+    expect: str | None = None
+    expect_text: str | None = None
+    expect_meta: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -83,10 +91,10 @@ class BatchResult:
 
 
 def load_queries(path: str | Path) -> list[BatchQuery]:
-    """Load ``(query, expect)`` pairs from a JSON-Lines file.
+    """Load query rows from a JSON-Lines file.
 
-    Each non-blank line must be a JSON object carrying at least ``query`` and
-    ``expect``. Blank lines are skipped.
+    Each non-blank line must be a JSON object carrying ``query`` and exactly one
+    of ``expect``, ``expect_text``, or ``expect_meta``. Blank lines are skipped.
 
     Args:
         path: Path to the ``.jsonl`` queries file.
@@ -95,12 +103,13 @@ def load_queries(path: str | Path) -> list[BatchQuery]:
         The parsed queries in file order (empty for an empty file).
 
     Raises:
-        ValueError: If a line is not valid JSON or lacks ``query``/``expect``.
+        ValueError: If a line is not valid JSON or lacks a valid locator.
             The message is prefixed with ``path:line_number`` so the failing line
             is unambiguous.
     """
     file_path = Path(path)
     queries: list[BatchQuery] = []
+    locators = ("expect", "expect_text", "expect_meta")
     with file_path.open("r", encoding="utf-8") as handle:
         for line_number, raw in enumerate(handle, start=1):
             stripped = raw.strip()
@@ -110,11 +119,20 @@ def load_queries(path: str | Path) -> list[BatchQuery]:
                 record = json.loads(stripped)
             except json.JSONDecodeError as exc:
                 raise ValueError(f"{file_path}:{line_number}: invalid JSON ({exc.msg})") from exc
-            if not isinstance(record, dict) or "query" not in record or "expect" not in record:
+            present = [key for key in locators if isinstance(record, dict) and key in record]
+            if not isinstance(record, dict) or "query" not in record or len(present) != 1:
                 raise ValueError(
-                    f"{file_path}:{line_number}: each line needs 'query' and 'expect' keys"
+                    f"{file_path}:{line_number}: each line needs 'query' and exactly "
+                    "one of 'expect', 'expect_text', 'expect_meta'"
                 )
-            queries.append(BatchQuery(query=str(record["query"]), expect=str(record["expect"])))
+            queries.append(
+                BatchQuery(
+                    query=str(record["query"]),
+                    expect=str(record["expect"]) if "expect" in record else None,
+                    expect_text=(str(record["expect_text"]) if "expect_text" in record else None),
+                    expect_meta=(str(record["expect_meta"]) if "expect_meta" in record else None),
+                )
+            )
     return queries
 
 
@@ -139,12 +157,15 @@ def run_batch(
     fix_axis_counter: Counter[str] = Counter()
 
     for query in queries:
-        diagnosis = run_diagnose(retriever, query.query, query.expect, cfg)
-        fixes = search_fixes(retriever, query.query, query.expect, cfg)
+        expected_id = query.expect
+        if expected_id is None:
+            raise ValueError("run_batch requires each query to have expect resolved to a chunk id")
+        diagnosis = run_diagnose(retriever, query.query, expected_id, cfg)
+        fixes = search_fixes(retriever, query.query, expected_id, cfg)
         rows.append(
             BatchRow(
                 query=query.query,
-                expect=query.expect,
+                expect=expected_id,
                 failure_class=diagnosis.failure_class,
                 fix=fixes.best,
             )
