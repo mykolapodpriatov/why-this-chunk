@@ -122,6 +122,12 @@ class RerankingRetriever:
         """Advertises a configured reranker for the counterfactual axis."""
         return True
 
+    @property
+    def backend(self) -> str | None:
+        """The base retriever's dense index backend, if it exposes one."""
+        value = getattr(self._base, "backend", None)
+        return value if isinstance(value, str) else None
+
     def search(self, query: str, k: int) -> list[ScoredChunk]:
         """Return the top-``k`` results, reranked when active."""
         if not self._active:

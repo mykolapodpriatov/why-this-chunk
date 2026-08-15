@@ -10,10 +10,12 @@ with zero downloads; pass ``--embedder st`` to use the real
 :class:`~why_this_chunk.embedders.sentence_transformers.SentenceTransformerEmbedder`
 and ``--rerank`` (with an optional ``--rerank-model`` override) to wrap the
 retriever in a :class:`~why_this_chunk.rerank.RerankingRetriever`, both gated on
-the ``[st]`` extra with a clear CLI error when it is missing. A single
-``--format {rich,md,json}`` switch selects the output shape (rich terminal view
-by default, Markdown, or machine-readable JSON). ``--json`` is retained as a
-hidden, deprecated alias for ``--format json``.
+the ``[st]`` extra with a clear CLI error when it is missing. Pass ``--faiss``
+to use the FAISS dense index (dense and hybrid modes), gated on the ``[faiss]``
+extra the same way; the active backend (``faiss`` or ``numpy``) is reported in
+rich/md/json output. A single ``--format {rich,md,json}`` switch selects the
+output shape (rich terminal view by default, Markdown, or machine-readable
+JSON). ``--json`` is retained as a hidden, deprecated alias for ``--format json``.
 """
 
 from __future__ import annotations
@@ -261,6 +263,40 @@ def _build_reranker(model_name: str | None) -> CrossEncoderReranker:
         raise typer.Exit(code=2) from exc
 
 
+def _require_faiss() -> None:
+    """Fail with a clear CLI error when ``--faiss`` is set but the extra is missing.
+
+    The library's ``DenseRetriever(use_faiss=True)`` silently falls back to numpy
+    if FAISS is not installed; the CLI must not, so users who installed the
+    extra (or think they did) get a hard error instead of a silent numpy path.
+    """
+    try:
+        import faiss  # noqa: F401
+    except ImportError as exc:
+        _err_console.print(
+            "[red]error:[/red] --faiss requires the optional 'faiss' extra. "
+            "Install it with: pip install 'why-this-chunk[faiss]'"
+        )
+        raise typer.Exit(code=2) from exc
+
+
+def _backend_of(retriever: Retriever) -> str | None:
+    """Return the dense index backend (``faiss`` / ``numpy``) if the retriever has one."""
+    value = getattr(retriever, "backend", None)
+    return value if isinstance(value, str) else None
+
+
+def _print_backend(fmt: OutputFormat, retriever: Retriever) -> None:
+    """Emit the active backend in rich or Markdown so users can confirm FAISS."""
+    backend = _backend_of(retriever)
+    if backend is None:
+        return
+    if fmt is OutputFormat.MD:
+        sys.stdout.write(f"- backend: {backend}\n")
+        return
+    _console.print(f"backend: [cyan]{backend}[/cyan]")
+
+
 def _build_retriever(
     corpus: Corpus,
     mode: Mode,
@@ -271,13 +307,18 @@ def _build_retriever(
     embedder_choice: EmbedderChoice = EmbedderChoice.FAKE,
     rerank: bool = False,
     rerank_model: str | None = None,
+    use_faiss: bool = False,
 ) -> Retriever:
     retriever: Retriever
     if mode is Mode.BM25:
         retriever = BM25Retriever(corpus, chunker=chunker, config=config)
     else:
+        if use_faiss:
+            _require_faiss()
         embedder = _build_embedder(embedder_choice, seed)
-        dense = DenseRetriever(corpus, embedder, chunker=chunker, config=config)
+        dense = DenseRetriever(
+            corpus, embedder, chunker=chunker, config=config, use_faiss=use_faiss
+        )
         if mode is Mode.DENSE:
             retriever = dense
         else:
@@ -325,6 +366,11 @@ def explain(
     rerank_model: str | None = typer.Option(
         None, "--rerank-model", help="Cross-encoder model id override for --rerank."
     ),
+    use_faiss: bool = typer.Option(
+        False,
+        "--faiss",
+        help="Use the FAISS dense backend (requires the 'faiss' extra).",
+    ),
     output_format: OutputFormat = typer.Option(
         OutputFormat.RICH, "--format", help="Output shape: rich, md, or json."
     ),
@@ -342,7 +388,16 @@ def explain(
         rerank=rerank,
     )
     retriever = _build_retriever(
-        loaded, mode, alpha, seed, chunker, config, embedder, rerank, rerank_model
+        loaded,
+        mode,
+        alpha,
+        seed,
+        chunker,
+        config,
+        embedder,
+        rerank,
+        rerank_model,
+        use_faiss,
     )
     results = retriever.search(query, k)
     explanations = [
@@ -352,10 +407,12 @@ def explain(
     if fmt is OutputFormat.JSON:
         payload = {
             "query": query,
+            "backend": _backend_of(retriever),
             "explanations": [explanation_to_dict(e) for e in explanations],
         }
         _console.print_json(json_module.dumps(payload))
         return
+    _print_backend(fmt, retriever)
     if fmt is OutputFormat.MD:
         for explanation in explanations:
             sys.stdout.write(explanation_to_markdown(explanation))
@@ -418,6 +475,11 @@ def diagnose(
     rerank_model: str | None = typer.Option(
         None, "--rerank-model", help="Cross-encoder model id override for --rerank."
     ),
+    use_faiss: bool = typer.Option(
+        False,
+        "--faiss",
+        help="Use the FAISS dense backend (requires the 'faiss' extra).",
+    ),
     output_format: OutputFormat = typer.Option(
         OutputFormat.RICH, "--format", help="Output shape: rich, md, or json."
     ),
@@ -435,13 +497,25 @@ def diagnose(
         rerank=rerank,
     )
     retriever = _build_retriever(
-        loaded, mode, alpha, seed, chunker, config, embedder, rerank, rerank_model
+        loaded,
+        mode,
+        alpha,
+        seed,
+        chunker,
+        config,
+        embedder,
+        rerank,
+        rerank_model,
+        use_faiss,
     )
     result = _diagnose_with_fix(retriever, query, expect, config)
 
     if fmt is OutputFormat.JSON:
-        _console.print_json(json_module.dumps(diagnosis_to_dict(result)))
+        payload = diagnosis_to_dict(result)
+        payload["backend"] = _backend_of(retriever)
+        _console.print_json(json_module.dumps(payload))
         return
+    _print_backend(fmt, retriever)
     if fmt is OutputFormat.MD:
         sys.stdout.write(diagnosis_to_markdown(result))
         return
@@ -483,6 +557,11 @@ def fix(
     rerank_model: str | None = typer.Option(
         None, "--rerank-model", help="Cross-encoder model id override for --rerank."
     ),
+    use_faiss: bool = typer.Option(
+        False,
+        "--faiss",
+        help="Use the FAISS dense backend (requires the 'faiss' extra).",
+    ),
     show_all: bool = typer.Option(False, "--all", help="Show every fix, ranked."),
     output_format: OutputFormat = typer.Option(
         OutputFormat.RICH, "--format", help="Output shape: rich, md, or json."
@@ -501,13 +580,25 @@ def fix(
         rerank=rerank,
     )
     retriever = _build_retriever(
-        loaded, mode, alpha, seed, chunker, config, embedder, rerank, rerank_model
+        loaded,
+        mode,
+        alpha,
+        seed,
+        chunker,
+        config,
+        embedder,
+        rerank,
+        rerank_model,
+        use_faiss,
     )
     result = search_fixes(retriever, query, expect, config)
 
     if fmt is OutputFormat.JSON:
-        _console.print_json(json_module.dumps(fixes_to_dict(result)))
+        payload = fixes_to_dict(result)
+        payload["backend"] = _backend_of(retriever)
+        _console.print_json(json_module.dumps(payload))
         return
+    _print_backend(fmt, retriever)
     if fmt is OutputFormat.MD:
         sys.stdout.write(fixes_to_markdown(result, show_all=show_all))
         return
@@ -550,6 +641,11 @@ def batch(
     rerank_model: str | None = typer.Option(
         None, "--rerank-model", help="Cross-encoder model id override for --rerank."
     ),
+    use_faiss: bool = typer.Option(
+        False,
+        "--faiss",
+        help="Use the FAISS dense backend (requires the 'faiss' extra).",
+    ),
     output_format: OutputFormat = typer.Option(
         OutputFormat.RICH, "--format", help="Output shape: rich, md, or json."
     ),
@@ -573,16 +669,29 @@ def batch(
         rerank=rerank,
     )
     retriever = _build_retriever(
-        loaded, mode, alpha, seed, chunker, config, embedder, rerank, rerank_model
+        loaded,
+        mode,
+        alpha,
+        seed,
+        chunker,
+        config,
+        embedder,
+        rerank,
+        rerank_model,
+        use_faiss,
     )
     result = run_batch(retriever, batch_queries, config)
 
     if fmt is OutputFormat.JSON:
-        _console.print_json(json_module.dumps(batch_to_dict(result)))
-    elif fmt is OutputFormat.MD:
-        sys.stdout.write(batch_to_markdown(result))
+        payload = batch_to_dict(result)
+        payload["backend"] = _backend_of(retriever)
+        _console.print_json(json_module.dumps(payload))
     else:
-        render_batch(result, _console)
+        _print_backend(fmt, retriever)
+        if fmt is OutputFormat.MD:
+            sys.stdout.write(batch_to_markdown(result))
+        else:
+            render_batch(result, _console)
 
     # Report the results first, then trip the CI gate so pipelines still see the
     # full diagnosis before the non-zero exit.
@@ -647,6 +756,11 @@ def serve(
     rerank_model: str | None = typer.Option(
         None, "--rerank-model", help="Cross-encoder model id override for --rerank."
     ),
+    use_faiss: bool = typer.Option(
+        False,
+        "--faiss",
+        help="Use the FAISS dense backend (requires the 'faiss' extra).",
+    ),
 ) -> None:
     """Launch the optional read-only FastAPI inspector (requires the [web] extra)."""
     try:
@@ -669,6 +783,7 @@ def serve(
         embedder_choice=embedder,
         rerank=rerank,
         rerank_model=rerank_model,
+        use_faiss=use_faiss,
     )
     web_app = create_app(retriever)
     uvicorn.run(web_app, host=host, port=port, log_level="info")

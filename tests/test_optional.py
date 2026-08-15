@@ -74,6 +74,7 @@ def test_web_app_endpoints(tiny_corpus: Corpus, embedder: FakeEmbedder) -> None:
     assert health.status_code == 200
     assert health.json()["status"] == "ok"
     assert health.json()["corpus_size"] == len(tiny_corpus)
+    assert health.json()["backend"] == "numpy"
 
     page = client.get("/")
     assert page.status_code == 200

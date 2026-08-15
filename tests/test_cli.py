@@ -23,6 +23,9 @@ EXAMPLES = Path(__file__).resolve().parent.parent / "examples"
 #: install (which is what CI installs).
 _HAS_ST = importlib.util.find_spec("sentence_transformers") is not None
 
+#: Same skip pattern for the optional FAISS dense backend (--faiss).
+_HAS_FAISS = importlib.util.find_spec("faiss") is not None
+
 
 @pytest.fixture
 def corpus_file(tmp_path: Path) -> Path:
@@ -775,6 +778,16 @@ def test_embedder_and_rerank_flags_are_registered() -> None:
     assert "--embedder" in option_flags
     assert "--rerank" in option_flags
     assert "--rerank-model" in option_flags
+    assert "--faiss" in option_flags
+
+
+def test_faiss_flag_is_registered_on_every_retriever_command() -> None:
+    commands = typer.main.get_command(app).commands
+    for name in ("explain", "diagnose", "fix", "batch", "serve"):
+        option_flags = {
+            opt for param in commands[name].params for opt in getattr(param, "opts", [])
+        }
+        assert "--faiss" in option_flags, name
 
 
 def test_embedder_bad_choice_exits_2(corpus_file: Path) -> None:
@@ -942,3 +955,201 @@ def test_rerank_flag_wires_reranking_retriever(
     assert result.exit_code == 0, result.output
     payload = json.loads(result.output)
     assert "rerank" not in payload["evidence"].get("fix_unevaluable_axes", [])
+
+
+@pytest.mark.skipif(_HAS_FAISS, reason="runs only when the faiss extra is absent")
+def test_faiss_without_extra_gives_clean_error(corpus_file: Path) -> None:
+    result = runner.invoke(
+        app,
+        [
+            "explain",
+            "Paris",
+            "--corpus",
+            str(corpus_file),
+            "--mode",
+            "dense",
+            "--faiss",
+        ],
+    )
+    assert result.exit_code == 2, result.output
+    assert "faiss" in result.output
+    assert "pip install" in result.output
+
+
+def test_faiss_bm25_mode_does_not_require_extra(corpus_file: Path) -> None:
+    # BM25 never builds a dense index, so --faiss must not force a faiss import
+    # (same contract as --embedder st in bm25 mode).
+    result = runner.invoke(
+        app,
+        [
+            "explain",
+            "Paris France",
+            "--corpus",
+            str(corpus_file),
+            "--mode",
+            "bm25",
+            "--faiss",
+            "--k",
+            "1",
+            "--format",
+            "json",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert payload["backend"] is None
+
+
+def test_dense_without_faiss_flag_surfaces_numpy_backend(corpus_file: Path) -> None:
+    result = runner.invoke(
+        app,
+        [
+            "explain",
+            "Paris France",
+            "--corpus",
+            str(corpus_file),
+            "--mode",
+            "dense",
+            "--k",
+            "1",
+            "--format",
+            "json",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert payload["backend"] == "numpy"
+
+
+@pytest.mark.skipif(not _HAS_FAISS, reason="faiss extra not installed")
+def test_faiss_flag_surfaces_faiss_backend_dense(corpus_file: Path) -> None:
+    result = runner.invoke(
+        app,
+        [
+            "explain",
+            "Paris France",
+            "--corpus",
+            str(corpus_file),
+            "--mode",
+            "dense",
+            "--faiss",
+            "--k",
+            "1",
+            "--format",
+            "json",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert payload["backend"] == "faiss"
+    assert payload["explanations"]
+
+
+@pytest.mark.skipif(not _HAS_FAISS, reason="faiss extra not installed")
+def test_faiss_flag_surfaces_faiss_backend_hybrid(corpus_file: Path) -> None:
+    result = runner.invoke(
+        app,
+        [
+            "explain",
+            "Paris France",
+            "--corpus",
+            str(corpus_file),
+            "--mode",
+            "hybrid",
+            "--faiss",
+            "--k",
+            "1",
+            "--format",
+            "json",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert payload["backend"] == "faiss"
+
+
+@pytest.mark.skipif(not _HAS_FAISS, reason="faiss extra not installed")
+def test_faiss_diagnose_fix_batch_surface_backend(corpus_file: Path, tmp_path: Path) -> None:
+    diagnose = runner.invoke(
+        app,
+        [
+            "diagnose",
+            "Paris France",
+            "--expect",
+            "seine",
+            "--corpus",
+            str(corpus_file),
+            "--mode",
+            "dense",
+            "--faiss",
+            "--k",
+            "1",
+            "--format",
+            "json",
+        ],
+    )
+    assert diagnose.exit_code == 0, diagnose.output
+    assert json.loads(diagnose.output)["backend"] == "faiss"
+
+    fix = runner.invoke(
+        app,
+        [
+            "fix",
+            "Paris France",
+            "--expect",
+            "seine",
+            "--corpus",
+            str(corpus_file),
+            "--mode",
+            "dense",
+            "--faiss",
+            "--format",
+            "json",
+        ],
+    )
+    assert fix.exit_code == 0, fix.output
+    assert json.loads(fix.output)["backend"] == "faiss"
+
+    queries = tmp_path / "queries.jsonl"
+    queries.write_text('{"query": "Paris France", "expect": "seine"}\n', encoding="utf-8")
+    batch = runner.invoke(
+        app,
+        [
+            "batch",
+            "--queries",
+            str(queries),
+            "--corpus",
+            str(corpus_file),
+            "--mode",
+            "dense",
+            "--faiss",
+            "--k",
+            "1",
+            "--format",
+            "json",
+        ],
+    )
+    assert batch.exit_code == 0, batch.output
+    assert json.loads(batch.output)["backend"] == "faiss"
+
+
+@pytest.mark.skipif(not _HAS_FAISS, reason="faiss extra not installed")
+def test_faiss_markdown_mentions_backend(corpus_file: Path) -> None:
+    result = runner.invoke(
+        app,
+        [
+            "explain",
+            "Paris France",
+            "--corpus",
+            str(corpus_file),
+            "--mode",
+            "dense",
+            "--faiss",
+            "--k",
+            "1",
+            "--format",
+            "md",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    assert "- backend: faiss" in result.output
