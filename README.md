@@ -68,7 +68,9 @@ why-this-chunk diagnose "NumPy fast numerical arrays for Python data science" \
     --expect python --corpus examples/corpus.jsonl --k 1 --embedder st --rerank
 ```
 
-`batch` reads a queries JSON-Lines file with one `{"query": ..., "expect": ...}` object per line (a sample lives in [`examples/queries.jsonl`](examples/queries.jsonl)), runs the same diagnose + fix path over each row, and prints an aggregate: the count per failure class, the most common suggested fix axis, and a per-query table.
+`batch` reads a queries JSON-Lines file with one object per line (a sample lives in [`examples/queries.jsonl`](examples/queries.jsonl)). Each row needs `query` and exactly one of `expect` (chunk id, unique metadata value, or unique text substring), `expect_text`, or `expect_meta`. It runs the same diagnose + fix path over each row and prints an aggregate: the count per failure class, the most common suggested fix axis, and a per-query table.
+
+`diagnose` / `fix` resolve `--expect` the same way: exact id first, then a unique metadata value (or `source_document_id`), then a unique case-insensitive substring of the chunk text. Ambiguous locators exit with a usage error listing the candidate ids; a real id that is simply absent still classifies as `missing_from_index`.
 
 Every command takes `--format {rich,md,json}` (default `rich`) to choose the output shape; `--json` is kept as a deprecated alias for `--format json`. Pick the retriever with `--mode {bm25,dense,hybrid}` (default `hybrid`). All CLI commands run offline by default using the deterministic `FakeEmbedder`; pass `--embedder st` for the real `SentenceTransformerEmbedder` and `--rerank` (with an optional `--rerank-model` override) to rerank the candidate pool with a cross-encoder — both require the `[st]` extra and fail with a clear error if it isn't installed. Pass `--faiss` to use the FAISS dense backend (dense and hybrid modes); that requires the `[faiss]` extra and likewise fails clearly if it isn't installed. The active backend (`faiss` or `numpy`) is reported in the command output.
 

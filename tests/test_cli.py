@@ -42,6 +42,34 @@ def corpus_file(tmp_path: Path) -> Path:
 
 
 @pytest.fixture
+def corpus_with_meta(tmp_path: Path) -> Path:
+    """Corpus whose metadata values and source_document_id are unique locators."""
+    path = tmp_path / "corpus_meta.jsonl"
+    lines = [
+        {
+            "id": "c-paris",
+            "text": "The capital of France is Paris.",
+            "metadata": {"doc": "wiki-paris", "topic": "geo"},
+            "source_document_id": "src-paris",
+        },
+        {
+            "id": "c-eiffel",
+            "text": "The Eiffel Tower is an iron landmark.",
+            "metadata": {"doc": "wiki-eiffel", "topic": "landmark"},
+            "source_document_id": "src-eiffel",
+        },
+        {
+            "id": "c-python",
+            "text": "Python is a programming language.",
+            "metadata": {"doc": "wiki-python", "topic": "tech"},
+            "source_document_id": "src-python",
+        },
+    ]
+    path.write_text("\n".join(json.dumps(line) for line in lines), encoding="utf-8")
+    return path
+
+
+@pytest.fixture
 def sources_file(tmp_path: Path) -> Path:
     """A raw ``{id, text}`` document long enough to split under small chunk sizes.
 
@@ -1153,3 +1181,242 @@ def test_faiss_markdown_mentions_backend(corpus_file: Path) -> None:
     )
     assert result.exit_code == 0, result.output
     assert "- backend: faiss" in result.output
+
+
+def test_expect_exact_id_still_works(corpus_file: Path) -> None:
+    result = runner.invoke(
+        app,
+        [
+            "diagnose",
+            "Paris France",
+            "--expect",
+            "seine",
+            "--corpus",
+            str(corpus_file),
+            "--k",
+            "1",
+            "--format",
+            "json",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert payload["failure_class"] != "missing_from_index"
+
+
+def test_expect_unique_substring_resolves(corpus_file: Path) -> None:
+    result = runner.invoke(
+        app,
+        [
+            "diagnose",
+            "yellow fruit",
+            "--expect",
+            "dietary potassium",
+            "--corpus",
+            str(corpus_file),
+            "--k",
+            "5",
+            "--format",
+            "json",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    # Resolved to banana; with k=5 the chunk is retrieved (not missing).
+    assert payload["failure_class"] != "missing_from_index"
+
+
+def test_expect_unique_substring_is_case_insensitive(corpus_file: Path) -> None:
+    result = runner.invoke(
+        app,
+        [
+            "diagnose",
+            "yellow fruit",
+            "--expect",
+            "DIETARY POTASSIUM",
+            "--corpus",
+            str(corpus_file),
+            "--k",
+            "5",
+            "--format",
+            "json",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.output)["failure_class"] != "missing_from_index"
+
+
+def test_expect_ambiguous_substring_exits_nonzero(corpus_file: Path) -> None:
+    result = runner.invoke(
+        app,
+        ["diagnose", "Paris", "--expect", "France", "--corpus", str(corpus_file)],
+    )
+    assert result.exit_code == 2, result.output
+    assert "matches" in result.output
+    assert "paris" in result.output
+    assert "eiffel" in result.output
+
+
+def test_expect_missing_id_still_missing_from_index(corpus_file: Path) -> None:
+    result = runner.invoke(
+        app,
+        [
+            "diagnose",
+            "Paris",
+            "--expect",
+            "nonexistent",
+            "--corpus",
+            str(corpus_file),
+            "--format",
+            "json",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert payload["failure_class"] == "missing_from_index"
+
+
+def test_expect_unique_metadata_value_resolves(corpus_with_meta: Path) -> None:
+    result = runner.invoke(
+        app,
+        [
+            "diagnose",
+            "Eiffel Tower",
+            "--expect",
+            "wiki-eiffel",
+            "--corpus",
+            str(corpus_with_meta),
+            "--k",
+            "3",
+            "--format",
+            "json",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.output)["failure_class"] != "missing_from_index"
+
+
+def test_expect_unique_source_document_id_resolves(corpus_with_meta: Path) -> None:
+    result = runner.invoke(
+        app,
+        [
+            "diagnose",
+            "capital France",
+            "--expect",
+            "src-paris",
+            "--corpus",
+            str(corpus_with_meta),
+            "--k",
+            "3",
+            "--format",
+            "json",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.output)["failure_class"] != "missing_from_index"
+
+
+def test_expect_ambiguous_metadata_exits_nonzero(tmp_path: Path) -> None:
+    path = tmp_path / "dup.jsonl"
+    path.write_text(
+        "\n".join(
+            [
+                json.dumps({"id": "a", "text": "alpha", "metadata": {"topic": "shared"}}),
+                json.dumps({"id": "b", "text": "beta", "metadata": {"topic": "shared"}}),
+            ]
+        ),
+        encoding="utf-8",
+    )
+    result = runner.invoke(
+        app,
+        ["diagnose", "alpha", "--expect", "shared", "--corpus", str(path)],
+    )
+    assert result.exit_code == 2, result.output
+    assert "metadata" in result.output
+    assert "a" in result.output
+    assert "b" in result.output
+
+
+def test_batch_expect_text_resolves(tmp_path: Path, corpus_file: Path) -> None:
+    queries = tmp_path / "q.jsonl"
+    queries.write_text(
+        '{"query": "yellow fruit", "expect_text": "dietary potassium"}\n',
+        encoding="utf-8",
+    )
+    result = runner.invoke(
+        app,
+        [
+            "batch",
+            "--queries",
+            str(queries),
+            "--corpus",
+            str(corpus_file),
+            "--k",
+            "5",
+            "--format",
+            "json",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert payload["rows"][0]["expect"] == "banana"
+    assert payload["rows"][0]["failure_class"] is None
+
+
+def test_batch_expect_meta_resolves(tmp_path: Path, corpus_with_meta: Path) -> None:
+    queries = tmp_path / "q.jsonl"
+    queries.write_text(
+        '{"query": "Eiffel Tower", "expect_meta": "wiki-eiffel"}\n',
+        encoding="utf-8",
+    )
+    result = runner.invoke(
+        app,
+        [
+            "batch",
+            "--queries",
+            str(queries),
+            "--corpus",
+            str(corpus_with_meta),
+            "--k",
+            "3",
+            "--format",
+            "json",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert payload["rows"][0]["expect"] == "c-eiffel"
+
+
+def test_batch_expect_text_zero_matches_exits_nonzero(tmp_path: Path, corpus_file: Path) -> None:
+    queries = tmp_path / "q.jsonl"
+    queries.write_text(
+        '{"query": "Paris", "expect_text": "no-such-phrase-in-corpus"}\n',
+        encoding="utf-8",
+    )
+    result = runner.invoke(
+        app,
+        ["batch", "--queries", str(queries), "--corpus", str(corpus_file)],
+    )
+    assert result.exit_code == 2, result.output
+    assert "matched 0 chunks" in result.output
+    assert "missing_from_index" not in result.output
+
+
+def test_fix_expect_unique_substring_resolves(corpus_file: Path) -> None:
+    result = runner.invoke(
+        app,
+        [
+            "fix",
+            "yellow fruit",
+            "--expect",
+            "dietary potassium",
+            "--corpus",
+            str(corpus_file),
+            "--format",
+            "json",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert "best" in payload

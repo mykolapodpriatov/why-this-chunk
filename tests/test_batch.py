@@ -71,6 +71,28 @@ def test_load_queries_missing_keys_reports_line(tmp_path: Path) -> None:
         load_queries(path)
 
 
+def test_load_queries_accepts_expect_text(tmp_path: Path) -> None:
+    path = tmp_path / "q.jsonl"
+    path.write_text('{"query": "a", "expect_text": "potassium"}\n', encoding="utf-8")
+    assert load_queries(path) == [BatchQuery(query="a", expect_text="potassium")]
+
+
+def test_load_queries_accepts_expect_meta(tmp_path: Path) -> None:
+    path = tmp_path / "q.jsonl"
+    path.write_text('{"query": "a", "expect_meta": "wiki-paris"}\n', encoding="utf-8")
+    assert load_queries(path) == [BatchQuery(query="a", expect_meta="wiki-paris")]
+
+
+def test_load_queries_rejects_multiple_locators(tmp_path: Path) -> None:
+    path = tmp_path / "q.jsonl"
+    path.write_text(
+        '{"query": "a", "expect": "x", "expect_text": "y"}\n',
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="exactly one"):
+        load_queries(path)
+
+
 def test_run_batch_aggregates(hybrid: HybridRetriever) -> None:
     queries = [
         BatchQuery(query="Paris France", expect="seine"),
