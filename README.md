@@ -68,7 +68,7 @@ why-this-chunk diagnose "NumPy fast numerical arrays for Python data science" \
     --expect python --corpus examples/corpus.jsonl --k 1 --embedder st --rerank
 ```
 
-`batch` reads a queries JSON-Lines file with one object per line (a sample lives in [`examples/queries.jsonl`](examples/queries.jsonl)). Each row needs `query` and exactly one of `expect` (chunk id, unique metadata value, or unique text substring), `expect_text`, or `expect_meta`. It runs the same diagnose + fix path over each row and prints an aggregate: the count per failure class, the most common suggested fix axis, and a per-query table.
+`batch` reads a queries JSON-Lines file with one object per line (a sample lives in [`examples/queries.jsonl`](examples/queries.jsonl)). Each row needs `query` and exactly one of `expect` (chunk id, unique metadata value, or unique text substring), `expect_text`, or `expect_meta`. It runs the same diagnose + fix path over each row and prints an aggregate: the count per failure class, the most common suggested fix axis, and a per-query table. Pass `--out PATH` to also write that report as a CI artifact (`--format md` writes Markdown; `--format json` or the default rich view writes JSON). The file is created (parents included) *before* `--fail-on` trips, so a failing gate still leaves the artifact behind.
 
 `diagnose` / `fix` resolve `--expect` the same way: exact id first, then a unique metadata value (or `source_document_id`), then a unique case-insensitive substring of the chunk text. Ambiguous locators exit with a usage error listing the candidate ids; a real id that is simply absent still classifies as `missing_from_index`.
 

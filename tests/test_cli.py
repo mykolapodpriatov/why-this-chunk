@@ -10,7 +10,17 @@ import pytest
 import typer.main
 from typer.testing import CliRunner
 
+from why_this_chunk import (
+    BM25Retriever,
+    Corpus,
+    DenseRetriever,
+    FakeEmbedder,
+    HybridRetriever,
+    RetrievalConfig,
+)
+from why_this_chunk.batch import load_queries, run_batch
 from why_this_chunk.cli import app
+from why_this_chunk.report import batch_to_markdown
 
 runner = CliRunner()
 
@@ -1420,3 +1430,117 @@ def test_fix_expect_unique_substring_resolves(corpus_file: Path) -> None:
     assert result.exit_code == 0, result.output
     payload = json.loads(result.output)
     assert "best" in payload
+
+
+def _example_batch_markdown(*, top_k: int = 1) -> str:
+    """Render the example queries the same way ``batch --format md`` would."""
+    corpus = Corpus.from_jsonl(EXAMPLES / "corpus.jsonl")
+    queries = load_queries(EXAMPLES / "queries.jsonl")
+    retriever = HybridRetriever(
+        DenseRetriever(corpus, FakeEmbedder(seed=0)),
+        BM25Retriever(corpus),
+        alpha=0.5,
+    )
+    result = run_batch(retriever, queries, RetrievalConfig(top_k=top_k, alpha=0.5))
+    return batch_to_markdown(result)
+
+
+def test_batch_out_md_matches_renderer(tmp_path: Path) -> None:
+    out = tmp_path / "report.md"
+    result = runner.invoke(
+        app,
+        [
+            "batch",
+            "--queries",
+            str(EXAMPLES / "queries.jsonl"),
+            "--corpus",
+            str(EXAMPLES / "corpus.jsonl"),
+            "--k",
+            "1",
+            "--format",
+            "md",
+            "--out",
+            str(out),
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    assert out.read_text(encoding="utf-8") == _example_batch_markdown()
+
+
+def test_batch_out_fail_on_still_writes_file(tmp_path: Path) -> None:
+    out = tmp_path / "artifacts" / "report.json"
+    result = runner.invoke(
+        app,
+        [
+            "batch",
+            "--queries",
+            str(EXAMPLES / "queries.jsonl"),
+            "--corpus",
+            str(EXAMPLES / "corpus.jsonl"),
+            "--k",
+            "1",
+            "--fail-on",
+            "failure",
+            "--format",
+            "json",
+            "--out",
+            str(out),
+        ],
+    )
+    # Gate trips, but the artifact must already be on disk for CI to pick it up.
+    assert result.exit_code == 1, result.output
+    assert out.is_file()
+    payload = json.loads(out.read_text(encoding="utf-8"))
+    assert payload["count"] == 8
+    assert payload["failure_counts"]
+
+
+def test_batch_out_creates_parent_directories(tmp_path: Path) -> None:
+    out = tmp_path / "nested" / "dir" / "report.md"
+    result = runner.invoke(
+        app,
+        [
+            "batch",
+            "--queries",
+            str(EXAMPLES / "queries.jsonl"),
+            "--corpus",
+            str(EXAMPLES / "corpus.jsonl"),
+            "--k",
+            "1",
+            "--format",
+            "md",
+            "--out",
+            str(out),
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    assert out.is_file()
+    assert out.read_text(encoding="utf-8").startswith("## batch")
+
+
+def test_batch_out_unwritable_exits_2(tmp_path: Path) -> None:
+    blocker = tmp_path / "not-a-directory"
+    blocker.write_text("in the way", encoding="utf-8")
+    out = blocker / "report.md"
+    result = runner.invoke(
+        app,
+        [
+            "batch",
+            "--queries",
+            str(EXAMPLES / "queries.jsonl"),
+            "--corpus",
+            str(EXAMPLES / "corpus.jsonl"),
+            "--k",
+            "1",
+            "--out",
+            str(out),
+        ],
+    )
+    assert result.exit_code == 2, result.output
+    assert "cannot write" in result.output
+
+
+def test_batch_out_flag_is_registered() -> None:
+    batch_cmd = typer.main.get_command(app).commands["batch"]
+    option_flags = {opt for param in batch_cmd.params for opt in getattr(param, "opts", [])}
+    assert "--out" in option_flags
