@@ -44,3 +44,22 @@ jobs:
 
       - name: Pytest with coverage
         run: pytest -q --cov=why_this_chunk --cov-report=term-missing
+
+  adapters:
+    name: vector-store adapters
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      # The main matrix installs only [dev], so the adapter suite skips there.
+      # Qdrant's `:memory:` mode runs in-process, so exercising the real query
+      # path here still needs no service container and no network.
+      - name: Upgrade pip
+        run: python -m pip install --upgrade pip
+      - name: Install package with the qdrant extra
+        run: python -m pip install -e ".[dev,qdrant]"
+      - name: Pytest (adapters)
+        run: pytest -q tests/test_qdrant_adapter.py

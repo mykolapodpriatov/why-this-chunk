@@ -34,6 +34,7 @@ pip install why-this-chunk            # core: numpy, rank_bm25, typer, rich, pyd
 pip install "why-this-chunk[st]"      # real local embeddings + cross-encoder rerank (sentence-transformers)
 pip install "why-this-chunk[faiss]"   # FAISS dense backend (faiss-cpu)
 pip install "why-this-chunk[web]"     # read-only FastAPI inspector
+pip install "why-this-chunk[qdrant]"  # explain an existing Qdrant collection
 ```
 
 From a checkout, for development:
@@ -131,6 +132,43 @@ A runnable, zero-download demo of `explain` and `diagnose` lives in [`examples/d
 python examples/demo.py
 ```
 
+### Explaining an index you already have (optional)
+
+The built-in retrievers own their corpus in-process. To explain a **Qdrant
+collection that already holds your chunks and embeddings**, wrap it instead of
+re-ingesting it:
+
+```python
+from qdrant_client import QdrantClient
+from why_this_chunk import explain_chunk
+from why_this_chunk.retrievers.adapters.qdrant import QdrantRetriever
+
+retriever = QdrantRetriever(
+    QdrantClient(url="http://localhost:6333"),
+    "my_chunks",
+    embedder,  # the same embedder that produced the stored vectors
+    text_field="text",  # payload key holding the chunk body
+    id_field="chunk_id",  # payload key holding your chunk id (else the point id)
+)
+
+top = retriever.search("why did this rank here?", k=1)[0]
+print(explain_chunk(retriever, "why did this rank here?", top).sentences[0].share)
+```
+
+What you get and what you don't, stated up front rather than faked:
+
+| | |
+|---|---|
+| Sentence-level occlusion attribution | ✅ — `score_text` re-embeds locally, no store round-trip |
+| `explain` / `diagnose` / the `top_k` and `alpha` reasoning | ✅ |
+| Lexical-vs-dense split | ❌ — a vector store has no lexical modality; `split` is `None` |
+| `chunk_size` counterfactual axis | ❌ — re-chunking means rewriting the store, so it is reported **unevaluable**, never silently skipped |
+
+Scores are true cosine similarities on the same scale as the built-in dense
+retriever, which the `Embedder` contract's L2-normalized vectors make exact for
+`Cosine`, `Dot` and `Euclid` collections. A `Manhattan` collection has no such
+identity and is rejected at construction rather than mis-scored.
+
 ### Web inspector (optional)
 
 ```bash
@@ -166,7 +204,8 @@ Beta. The core explainer, taxonomy, counterfactual search, CLI, and a minimal we
 - [x] Counterfactual minimal-config-fix search
 - [x] CLI (`explain` / `diagnose` / `fix` / `batch`) with rich / Markdown / JSON output
 - [x] Optional local embeddings, cross-encoder rerank, FAISS backend, read-only web inspector
-- [ ] pgvector / Qdrant adapters
+- [x] Qdrant adapter over an existing collection
+- [ ] pgvector adapter
 
 ## License
 
