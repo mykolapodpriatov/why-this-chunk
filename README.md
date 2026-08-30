@@ -35,6 +35,7 @@ pip install "why-this-chunk[st]"      # real local embeddings + cross-encoder re
 pip install "why-this-chunk[faiss]"   # FAISS dense backend (faiss-cpu)
 pip install "why-this-chunk[web]"     # read-only FastAPI inspector
 pip install "why-this-chunk[qdrant]"  # explain an existing Qdrant collection
+pip install "why-this-chunk[pg]"      # explain an existing PostgreSQL + pgvector table
 ```
 
 From a checkout, for development:
@@ -134,9 +135,9 @@ python examples/demo.py
 
 ### Explaining an index you already have (optional)
 
-The built-in retrievers own their corpus in-process. To explain a **Qdrant
-collection that already holds your chunks and embeddings**, wrap it instead of
-re-ingesting it:
+The built-in retrievers own their corpus in-process. To explain a **store that
+already holds your chunks and embeddings**, wrap it instead of re-ingesting it.
+For a Qdrant collection:
 
 ```python
 from qdrant_client import QdrantClient
@@ -155,6 +156,31 @@ top = retriever.search("why did this rank here?", k=1)[0]
 print(explain_chunk(retriever, "why did this rank here?", top).sentences[0].share)
 ```
 
+For a PostgreSQL table with a `pgvector` column — same adapter boundary, same
+scores, driven by one `ORDER BY <distance> LIMIT k` so your existing index does
+the work:
+
+```python
+from why_this_chunk.retrievers.adapters.pgvector import PgVectorRetriever
+
+retriever = PgVectorRetriever(
+    "postgresql://localhost/mydb",
+    "chunks",  # or "schema.chunks"
+    embedder,
+    id_column="chunk_id",
+    text_column="body",
+    embedding_column="embedding",
+    metadata_column="meta",  # optional jsonb column, carried onto the chunk
+    metric="cosine",  # must match the operator class of your index
+)
+```
+
+The table must hold each chunk's **text** as well as its vector: attribution
+occludes sentences of the chunk body. Table and column names are validated as
+SQL identifiers and quoted, never interpolated raw; the query vector and `k` are
+bound parameters. The connection is opened lazily and reused — pass
+`connection=` to reuse one you already own, and it stays yours to close.
+
 What you get and what you don't, stated up front rather than faked:
 
 | | |
@@ -166,8 +192,9 @@ What you get and what you don't, stated up front rather than faked:
 
 Scores are true cosine similarities on the same scale as the built-in dense
 retriever, which the `Embedder` contract's L2-normalized vectors make exact for
-`Cosine`, `Dot` and `Euclid` collections. A `Manhattan` collection has no such
-identity and is rejected at construction rather than mis-scored.
+Qdrant's `Cosine`, `Dot` and `Euclid` collections and for pgvector's `cosine`,
+`ip` and `l2` operators. A `Manhattan` collection has no such identity and is
+rejected at construction rather than mis-scored.
 
 ### Web inspector (optional)
 
@@ -205,7 +232,7 @@ Beta. The core explainer, taxonomy, counterfactual search, CLI, and a minimal we
 - [x] CLI (`explain` / `diagnose` / `fix` / `batch`) with rich / Markdown / JSON output
 - [x] Optional local embeddings, cross-encoder rerank, FAISS backend, read-only web inspector
 - [x] Qdrant adapter over an existing collection
-- [ ] pgvector adapter
+- [x] pgvector adapter over an existing table
 
 ## License
 
