@@ -21,3 +21,6 @@ htmlcov/
 .vscode/
 .DS_Store
 *.log
+
+# local portfolio tooling output, not part of this project
+logs/
