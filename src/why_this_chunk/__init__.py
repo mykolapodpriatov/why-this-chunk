@@ -21,7 +21,7 @@ from why_this_chunk.config import (
 )
 from why_this_chunk.contributions import compute_split, split_for_result
 from why_this_chunk.corpus import Corpus
-from why_this_chunk.counterfactual import CounterfactualResult, search_fixes
+from why_this_chunk.counterfactual import CounterfactualResult, FixPlan, search_fixes
 from why_this_chunk.embedders import Embedder, FakeEmbedder
 from why_this_chunk.retrievers import Retriever
 from why_this_chunk.retrievers.bm25 import BM25Retriever
@@ -83,4 +83,5 @@ __all__ = [  # noqa: RUF022
     "large_k",
     "search_fixes",
     "CounterfactualResult",
+    "FixPlan",
 ]

@@ -39,7 +39,7 @@ from why_this_chunk.batch import (
 )
 from why_this_chunk.config import RetrievalConfig
 from why_this_chunk.corpus import Corpus, lint_jsonl
-from why_this_chunk.counterfactual import search_fixes
+from why_this_chunk.counterfactual import DEFAULT_MAX_COMBINATIONS, search_fixes
 from why_this_chunk.embedders import Embedder, FakeEmbedder
 from why_this_chunk.report import (
     batch_to_dict,
@@ -712,6 +712,23 @@ def fix(
         help="Use the FAISS dense backend (requires the 'faiss' extra).",
     ),
     show_all: bool = typer.Option(False, "--all", help="Show every fix, ranked."),
+    max_axes: int = typer.Option(
+        1,
+        "--max-axes",
+        min=1,
+        max=2,
+        help=(
+            "1 (default) searches one axis at a time. 2 adds a second pass over "
+            "pairs, run only when no single axis worked. It costs a reindex per "
+            "combination, which is why it is opt-in."
+        ),
+    ),
+    max_combinations: int = typer.Option(
+        DEFAULT_MAX_COMBINATIONS,
+        "--max-combinations",
+        min=1,
+        help="Ceiling on evaluated pairs with --max-axes 2.",
+    ),
     output_format: OutputFormat = typer.Option(
         OutputFormat.RICH, "--format", help="Output shape: rich, md, or json."
     ),
@@ -719,7 +736,7 @@ def fix(
         False, "--json", hidden=True, help="Deprecated alias for --format json."
     ),
 ) -> None:
-    """Report the single cheapest config change (or all of them with --all)."""
+    """Report the cheapest config change (or all of them with --all)."""
     fmt = _resolve_format(output_format, as_json)
     loaded, chunker = _resolve_corpus(corpus, from_sources, chunk_size, overlap)
     expect = _resolve_expect(loaded, expect)
@@ -741,7 +758,14 @@ def fix(
         rerank_model,
         use_faiss,
     )
-    result = search_fixes(retriever, query, expect, config)
+    result = search_fixes(
+        retriever,
+        query,
+        expect,
+        config,
+        max_axes=max_axes,
+        max_combinations=max_combinations,
+    )
 
     if fmt is OutputFormat.JSON:
         payload = fixes_to_dict(result)

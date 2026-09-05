@@ -19,7 +19,7 @@ from rich.console import Console
 from rich.table import Table
 
 from why_this_chunk.batch import BatchResult, BatchRow
-from why_this_chunk.counterfactual import CounterfactualResult
+from why_this_chunk.counterfactual import CounterfactualResult, FixPlan
 from why_this_chunk.types import (
     ContributionSplit,
     DiagnosisResult,
@@ -127,7 +127,31 @@ def render_fixes(
     if result.unevaluable:
         out.print(f"[dim]unevaluable axes:[/dim] {', '.join(result.unevaluable)}")
     if result.best is None:
-        out.print("[yellow]no single bounded config change surfaced the chunk[/yellow]")
+        if result.pair_fixes:
+            # Marked as two changes, not printed like a one-line fix: a reader
+            # skimming a batch report must not have to count fields to see that
+            # applying this means editing two knobs.
+            plans = result.pair_fixes if show_all else result.pair_fixes[:1]
+            out.print("[yellow]no single change worked; two together do:[/yellow]")
+            for plan in plans:
+                out.print(
+                    f"[green]2 axes[/green] {' + '.join(plan.axes)}  "
+                    f"(cost={plan.cost}, new_rank={plan.new_rank})"
+                )
+                for change in plan.changes:
+                    out.print(
+                        f"    [green]{change.param}[/green] {change.from_value!r} -> "
+                        f"{change.to_value!r}  (cost={change.cost})  {change.explanation}"
+                    )
+            return
+        if result.capped:
+            # "Stopped looking" and "there is nothing" are different answers.
+            out.print(
+                "[yellow]no fix found before the combination cap was reached; "
+                "raise --max-combinations to keep looking[/yellow]"
+            )
+            return
+        out.print("[yellow]no bounded config change surfaced the chunk[/yellow]")
         return
     fixes = result.all_fixes if show_all else [result.best]
     for suggestion in fixes:
@@ -197,8 +221,29 @@ def fixes_to_markdown(result: CounterfactualResult, *, show_all: bool = False) -
     if result.unevaluable:
         lines.append(f"- unevaluable axes: {', '.join(result.unevaluable)}")
         lines.append("")
+    if result.best is None and result.pair_fixes:
+        plans = result.pair_fixes if show_all else result.pair_fixes[:1]
+        lines.append("- no single change worked; **two together** do:")
+        lines.append("")
+        lines.append("| axes | param | from | to | cost | new rank | explanation |")
+        lines.append("| --- | --- | --- | --- | ---: | ---: | --- |")
+        for plan in plans:
+            label = " + ".join(plan.axes)
+            for change in plan.changes:
+                explanation = change.explanation.replace("|", "\\|")
+                lines.append(
+                    f"| **{label}** | `{change.param}` | `{change.from_value}` | "
+                    f"`{change.to_value}` | {change.cost} | {plan.new_rank} | {explanation} |"
+                )
+        return "\n".join(lines) + "\n"
     if result.best is None:
-        lines.append("- fix: _no single bounded config change surfaced the chunk_")
+        if result.capped:
+            lines.append(
+                "- fix: _no fix found before the combination cap; raise "
+                "`--max-combinations` to keep looking_"
+            )
+        else:
+            lines.append("- fix: _no bounded config change surfaced the chunk_")
         return "\n".join(lines) + "\n"
     fixes = result.all_fixes if show_all else [result.best]
     lines.append("| param | from | to | cost | new rank | explanation |")
@@ -216,12 +261,28 @@ def _fix_to_dict(fix: FixSuggestion | None) -> dict[str, Any] | None:
     return asdict(fix) if fix is not None else None
 
 
+def _plan_to_dict(plan: FixPlan) -> dict[str, Any]:
+    return {
+        "axes": list(plan.axes),
+        "cost": plan.cost,
+        "new_rank": plan.new_rank,
+        "explanation": plan.explanation,
+        "changes": [asdict(change) for change in plan.changes],
+    }
+
+
 def fixes_to_dict(result: CounterfactualResult) -> dict[str, Any]:
     """Return a JSON-serializable dict for a :class:`CounterfactualResult`."""
+    best_plan = result.best_plan
     return {
         "best": _fix_to_dict(result.best),
         "all_fixes": [asdict(fix) for fix in result.all_fixes],
         "unevaluable": result.unevaluable,
+        # The recommended plan, whether it is one change or two, so a consumer
+        # does not have to work out which field to read.
+        "best_plan": None if best_plan is None else _plan_to_dict(best_plan),
+        "pair_fixes": [_plan_to_dict(plan) for plan in result.pair_fixes],
+        "capped": result.capped,
     }
 
 

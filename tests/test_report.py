@@ -14,6 +14,7 @@ from why_this_chunk import (
     search_fixes,
 )
 from why_this_chunk.batch import BatchQuery, run_batch
+from why_this_chunk.counterfactual import CounterfactualResult, FixPlan
 from why_this_chunk.report import (
     batch_to_dict,
     batch_to_markdown,
@@ -21,15 +22,19 @@ from why_this_chunk.report import (
     diagnosis_to_markdown,
     explanation_to_dict,
     explanation_to_markdown,
+    fixes_to_dict,
+    fixes_to_markdown,
     render_batch,
     render_diagnosis,
     render_explanation,
+    render_fixes,
 )
 from why_this_chunk.types import (
     Chunk,
     DiagnosisResult,
     Explanation,
     FailureClass,
+    FixSuggestion,
     ScoredChunk,
 )
 
@@ -148,3 +153,88 @@ def test_markdown_escapes_pipe_in_text() -> None:
     )
     md = explanation_to_markdown(explanation)
     assert "\\|" in md
+
+
+# ---------------------------------------------------------------------------
+# two-axis fix rendering
+# ---------------------------------------------------------------------------
+
+
+def _pair_result() -> CounterfactualResult:
+    """A result whose only fix needs two changes."""
+    plan = FixPlan(
+        changes=(
+            FixSuggestion(
+                param="chunk_size",
+                from_value=512,
+                to_value=256,
+                cost=2,
+                new_rank=0,
+                explanation="set chunk_size to 256 so the expected text stays in one chunk",
+            ),
+            FixSuggestion(
+                param="rerank",
+                from_value=False,
+                to_value=True,
+                cost=4,
+                new_rank=0,
+                explanation="enable the reranker",
+            ),
+        ),
+        cost=6,
+        new_rank=0,
+    )
+    return CounterfactualResult(best=None, all_fixes=[], unevaluable=[], pair_fixes=[plan])
+
+
+def test_terminal_marks_a_pair_as_two_changes() -> None:
+    # A reader skimming a batch report must not have to count fields to see
+    # that applying this means editing two knobs.
+    console = Console(file=io.StringIO(), width=200, color_system=None)
+
+    render_fixes(_pair_result(), console)
+
+    out = console.file.getvalue()  # type: ignore[attr-defined]
+    assert "2 axes" in out
+    assert "chunk_size + rerank" in out
+    assert "no single change worked" in out
+
+
+def test_terminal_distinguishes_capped_from_no_fix() -> None:
+    console = Console(file=io.StringIO(), width=200, color_system=None)
+    capped = CounterfactualResult(best=None, all_fixes=[], unevaluable=[], capped=True)
+
+    render_fixes(capped, console)
+
+    out = console.file.getvalue()  # type: ignore[attr-defined]
+    assert "cap" in out
+    assert "--max-combinations" in out
+
+
+def test_markdown_gives_a_pair_its_own_axes_column() -> None:
+    md = fixes_to_markdown(_pair_result())
+
+    assert "two together" in md
+    assert "| axes |" in md
+    assert "**chunk_size + rerank**" in md
+
+
+def test_json_carries_the_plan_and_the_cap_flag() -> None:
+    payload = fixes_to_dict(_pair_result())
+
+    assert payload["best"] is None
+    assert payload["best_plan"]["axes"] == ["chunk_size", "rerank"]
+    assert payload["best_plan"]["cost"] == 6
+    assert len(payload["best_plan"]["changes"]) == 2
+    assert payload["capped"] is False
+
+
+def test_json_best_plan_wraps_a_single_axis_fix() -> None:
+    """One shape for the caller to read, whether the answer is one change or two."""
+    fix = FixSuggestion(
+        param="top_k", from_value=5, to_value=8, cost=3, new_rank=7, explanation="raise top_k"
+    )
+    payload = fixes_to_dict(CounterfactualResult(best=fix, all_fixes=[fix], unevaluable=[]))
+
+    assert payload["best_plan"]["axes"] == ["top_k"]
+    assert len(payload["best_plan"]["changes"]) == 1
