@@ -377,3 +377,221 @@ def test_chunk_size_fix_recommended_when_window_fully_contains_span() -> None:
     chunk_fixes = [f for f in result.all_fixes if f.param == "chunk_size"]
     assert chunk_fixes, "a fully-containing window must yield a chunk_size fix"
     assert chunk_fixes[0].to_value == 256
+
+
+# ---------------------------------------------------------------------------
+# two-axis search
+# ---------------------------------------------------------------------------
+
+
+_PAIR_SPAN = (10, 40)
+
+
+class _PairStub:
+    """A retriever where no single axis works but two together do.
+
+    The covering chunk exists only at ``good_size``, and it ranks 0 only when
+    the reranker is also on; otherwise it sits at rank 7, outside the top-K
+    under test. So chunk_size alone finds it but too far down, rerank alone
+    finds nothing because the chunk does not exist yet, and top_k alone finds
+    nothing at all. That is the shape the pair pass exists for.
+    """
+
+    def __init__(
+        self,
+        *,
+        good_size: int = 256,
+        chunk_size: int = 512,
+        rerank: bool = False,
+        far_rank: int = 7,
+        reindexes: list[RetrievalConfig] | None = None,
+    ) -> None:
+        self._good_size = good_size
+        self._far_rank = far_rank
+        self._config = RetrievalConfig(chunk_size=chunk_size, rerank=rerank)
+        self.reindexes = reindexes if reindexes is not None else []
+        self._doc = SourceDocument(id="doc", text="y" * 2048)
+        self._expected = Chunk(
+            id="target",
+            text="y" * (_PAIR_SPAN[1] - _PAIR_SPAN[0]),
+            source_document_id="doc",
+            span=_PAIR_SPAN,
+        )
+        self._corpus = Corpus([self._expected], source_documents=[self._doc])
+
+    @property
+    def corpus(self) -> Corpus:
+        return self._corpus
+
+    @property
+    def corpus_size(self) -> int:
+        return 50
+
+    @property
+    def supports_components(self) -> bool:
+        return False
+
+    @property
+    def supports_reindex(self) -> bool:
+        return True
+
+    @property
+    def supports_rerank(self) -> bool:
+        return True
+
+    def search(self, query: str, k: int):  # type: ignore[no-untyped-def]
+        from why_this_chunk.types import ScoredChunk
+
+        if self._config.chunk_size != self._good_size:
+            return []
+        covering = Chunk(
+            id="doc::cover",
+            text="y" * self._good_size,
+            source_document_id="doc",
+            span=(0, self._good_size),
+        )
+        rank = 0 if self._config.rerank else self._far_rank
+        if rank >= k:
+            return []
+        filler = [
+            ScoredChunk(
+                chunk=Chunk(id=f"f{i}", text="filler", source_document_id="other"),
+                score=1.0,
+                rank=i,
+            )
+            for i in range(rank)
+        ]
+        return [*filler, ScoredChunk(chunk=covering, score=1.0, rank=rank)][:k]
+
+    def reindex(self, config: RetrievalConfig) -> _PairStub:
+        self.reindexes.append(config)
+        return _PairStub(
+            good_size=self._good_size,
+            chunk_size=config.chunk_size,
+            rerank=config.rerank,
+            far_rank=self._far_rank,
+            reindexes=self.reindexes,
+        )
+
+
+def _pair_config() -> RetrievalConfig:
+    return RetrievalConfig(top_k=3, chunk_size=512, rerank=False)
+
+
+def test_no_single_axis_fix_for_the_pair_case() -> None:
+    result = search_fixes(_PairStub(), "q", "target", _pair_config())
+
+    assert result.best is None
+    assert result.pair_fixes == []
+
+
+def test_two_axes_together_find_the_fix() -> None:
+    result = search_fixes(_PairStub(), "q", "target", _pair_config(), max_axes=2)
+
+    assert result.best is None
+    assert result.pair_fixes
+    plan = result.pair_fixes[0]
+    assert plan.axes == ("chunk_size", "rerank")
+    assert plan.new_rank == 0
+    # chunk_size 512 -> 256 is two sweep steps; the reranker costs RERANK_COST.
+    assert plan.cost == 2 + 4
+
+
+def test_the_cheapest_pair_wins() -> None:
+    """chunk_size + rerank (2 + 4) beats chunk_size + top_k (2 + 5)."""
+    result = search_fixes(_PairStub(), "q", "target", _pair_config(), max_axes=2)
+
+    assert result.pair_fixes[0].axes == ("chunk_size", "rerank")
+    assert any(plan.axes == ("top_k", "chunk_size") for plan in result.pair_fixes)
+    assert result.pair_fixes == sorted(result.pair_fixes, key=lambda p: p.cost)
+
+
+def test_a_single_axis_fix_stops_the_pair_pass() -> None:
+    """The second pass costs a reindex per combination, so it only runs when
+    the first pass found nothing."""
+    retriever = _ReindexableStub(good_size=256, current_size=512)
+
+    result = search_fixes(
+        retriever, "q", retriever.expected_id, RetrievalConfig(top_k=1, chunk_size=512), max_axes=2
+    )
+
+    assert result.best is not None
+    assert result.pair_fixes == []
+
+
+def test_a_one_axis_fix_outranks_a_pair_in_best_plan() -> None:
+    retriever = _ReindexableStub(good_size=256, current_size=512)
+
+    result = search_fixes(
+        retriever, "q", retriever.expected_id, RetrievalConfig(top_k=1, chunk_size=512), max_axes=2
+    )
+
+    plan = result.best_plan
+    assert plan is not None
+    assert len(plan.changes) == 1
+
+
+def test_best_plan_falls_through_to_the_pair() -> None:
+    result = search_fixes(_PairStub(), "q", "target", _pair_config(), max_axes=2)
+
+    plan = result.best_plan
+    assert plan is not None
+    assert len(plan.changes) == 2
+    assert "then" in plan.explanation
+
+
+def test_the_default_is_still_single_axis() -> None:
+    """Same input, same cost, same answer as before this feature existed."""
+    stub = _PairStub()
+
+    result = search_fixes(stub, "q", "target", _pair_config())
+
+    assert result.pair_fixes == []
+    assert not result.capped
+
+
+def test_hitting_the_cap_is_reported_as_capped_not_as_no_fix() -> None:
+    # "Stopped looking" and "there is nothing" are different answers.
+    result = search_fixes(
+        _PairStub(), "q", "target", _pair_config(), max_axes=2, max_combinations=1
+    )
+
+    assert result.capped
+    assert result.best is None
+
+
+def test_the_cap_actually_bounds_the_reindexes() -> None:
+    stub = _PairStub()
+
+    search_fixes(stub, "q", "target", _pair_config(), max_axes=2, max_combinations=3)
+
+    # Five single-axis reindexes (the chunk-size sweep minus the current size)
+    # plus the reranker toggle, then at most three more for the pair pass.
+    assert len(stub.reindexes) <= 6 + 3
+
+
+def test_an_unevaluable_axis_is_excluded_from_every_pair(bm25: BM25Retriever) -> None:
+    """A pair is unevaluable the moment either half is."""
+    result = search_fixes(bm25, "alpha beta gamma", "target", RetrievalConfig(top_k=1), max_axes=2)
+
+    assert "chunk_size" in result.unevaluable
+    for plan in result.pair_fixes:
+        assert "chunk_size" not in plan.axes
+
+
+def test_the_pair_pass_is_deterministic() -> None:
+    first = search_fixes(_PairStub(), "q", "target", _pair_config(), max_axes=2)
+    second = search_fixes(_PairStub(), "q", "target", _pair_config(), max_axes=2)
+
+    assert [plan.axes for plan in first.pair_fixes] == [plan.axes for plan in second.pair_fixes]
+    assert [plan.cost for plan in first.pair_fixes] == [plan.cost for plan in second.pair_fixes]
+
+
+def test_max_axes_and_max_combinations_are_validated() -> None:
+    import pytest
+
+    for bad in (0, 3, -1):
+        with pytest.raises(ValueError, match="max_axes"):
+            search_fixes(_PairStub(), "q", "target", _pair_config(), max_axes=bad)
+    with pytest.raises(ValueError, match="max_combinations"):
+        search_fixes(_PairStub(), "q", "target", _pair_config(), max_axes=2, max_combinations=0)

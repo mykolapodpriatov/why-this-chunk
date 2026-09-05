@@ -15,7 +15,7 @@ RAG debugging today is mostly guesswork. This tells you which layer is actually 
 - **Score attribution** — per-result sentence/token attribution of the similarity score via deterministic occlusion (model-agnostic, no model internals needed).
 - **Lexical vs dense split** — for hybrid retrievers, decompose the score into BM25 and dense contributions and report which dominated.
 - **Failure taxonomy** — classify a failed `(query, expected_chunk)` into `missing_from_index` / `lost_to_chunking` / `out_ranked` / `embedding_blind_spot`, with explicit evidence and an unambiguous, documented decision order.
-- **Counterfactual minimal fix** — search the smallest single config change (top-K, chunk size, hybrid alpha, reranker on/off) that surfaces the right chunk, with a documented per-axis cost.
+- **Counterfactual minimal fix:** search the smallest config change (top-K, chunk size, hybrid alpha, reranker on/off) that surfaces the right chunk, with a documented per-axis cost. One axis at a time by default; `--max-axes 2` adds a second pass over pairs for the query that needs two.
 - **Offline by default** — a deterministic hashing embedder (`FakeEmbedder`) makes the whole pipeline reproducible with zero downloads; real local embeddings and rerankers are opt-in extras.
 - **CLI + tiny web inspector** — a rich terminal UI (plus Markdown/JSON output) and an optional read-only FastAPI view.
 
@@ -204,6 +204,38 @@ why-this-chunk serve --corpus examples/corpus.jsonl
 # open http://127.0.0.1:8000
 ```
 
+### Two-axis fixes
+
+`fix` searches one axis at a time. When nothing single-axis works, the answer
+is often not "unfixable" but "two things are wrong at once": a chunk that is
+both split badly and out-ranked needs a smaller `chunk_size` to put the answer
+in one piece, and only then does a higher `alpha` pull it into the top-K.
+Neither alone moves it, and reporting that query as unfixable sends someone off
+to re-embed a corpus when two knobs would have done it.
+
+```bash
+why-this-chunk fix "..." --expect chunk-42 --corpus corpus.jsonl --max-axes 2
+```
+
+The second pass runs **only when the first found nothing**, because it costs a
+reindex per combination: single-axis is the sum of the per-axis candidate
+counts, pairs is the product. `--max-combinations` (default 64) bounds it, and
+hitting that bound is reported as capped rather than as "no fix". Those two
+answers are not the same and do not print the same.
+
+A one-axis fix always outranks a two-axis one, even when the two-axis one is
+cheaper on the cost scale. A reviewer applying it has to reason about one thing
+instead of two, and this tool exists to be read by a person.
+
+A pair is unevaluable the moment either half is, so an axis missing its
+capability or its corpus provenance keeps every pair it appears in out of the
+search rather than producing a fix nobody can apply.
+
+Every output distinguishes a pair from a single change: the terminal labels it
+`2 axes` and indents both changes under it, Markdown gives it an `axes` column,
+and the JSON adds `best_plan` (one shape whether the answer is one change or
+two), `pair_fixes` and `capped`.
+
 ## Bring your own retriever
 
 A third-party retriever only needs to implement `search(query, k) -> list[ScoredChunk]`. Richer behaviour is advertised through two boolean capabilities — `supports_components` (the dense/lexical split) and `supports_reindex` (returning a new retriever under a different `RetrievalConfig`). Any feature or counterfactual axis that depends on a missing capability or on corpus provenance is reported **unevaluable** rather than silently skipped.
@@ -228,7 +260,7 @@ Beta. The core explainer, taxonomy, counterfactual search, CLI, and a minimal we
 
 - [x] Score attribution + lexical/dense split for a hybrid retriever
 - [x] Per-query failure taxonomy classifier
-- [x] Counterfactual minimal-config-fix search
+- [x] Counterfactual minimal-config-fix search (single axis, and pairs via `--max-axes 2`)
 - [x] CLI (`explain` / `diagnose` / `fix` / `batch`) with rich / Markdown / JSON output
 - [x] Optional local embeddings, cross-encoder rerank, FAISS backend, read-only web inspector
 - [x] Qdrant adapter over an existing collection
