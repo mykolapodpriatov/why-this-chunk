@@ -40,6 +40,7 @@ instead of two, and this tool exists to be read by a person.
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 from itertools import combinations, product
 
@@ -265,7 +266,9 @@ def _try_alpha(
 
     best: FixSuggestion | None = None
     for index, alpha in enumerate(ALPHA_SWEEP):
-        if index == current_index:
+        # Skip the value already in use. The nearest grid point is not that
+        # value when the current alpha sits between two sweep entries.
+        if math.isclose(alpha, current_alpha, abs_tol=1e-9):
             continue
         rechunked = retriever.reindex(config.with_updates(alpha=alpha))
         rank = _rank_in(rechunked, query, expected_id, config.top_k)
@@ -376,7 +379,11 @@ def _alpha_candidates(retriever: Retriever, config: RetrievalConfig) -> list[_Ax
             explanation=f"shift hybrid alpha from {current_alpha} to {alpha}",
         )
         for index, alpha in enumerate(ALPHA_SWEEP)
-        if index != current_index
+        if not math.isclose(
+            alpha,
+            float(current_alpha if current_alpha is not None else 0.0),
+            abs_tol=1e-9,
+        )
     ]
 
 
