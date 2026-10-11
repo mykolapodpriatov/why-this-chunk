@@ -71,6 +71,16 @@ def test_min_max_normalize_empty() -> None:
     assert out.size == 0
 
 
+def test_min_max_normalize_non_finite_does_not_poison_the_range() -> None:
+    out = min_max_normalize(np.array([0.0, 1.0, np.nan]))
+    assert out.tolist() == [0.0, 1.0, 0.0]
+
+
+def test_min_max_normalize_all_non_finite_is_degenerate() -> None:
+    out = min_max_normalize(np.array([np.nan, np.inf]))
+    assert out.tolist() == [DEGENERATE_NORM_VALUE, DEGENERATE_NORM_VALUE]
+
+
 def test_hybrid_components_populated(hybrid: HybridRetriever) -> None:
     result = hybrid.search("Paris France capital", 1)[0]
     components = result.components
