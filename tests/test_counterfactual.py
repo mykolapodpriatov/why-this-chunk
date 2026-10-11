@@ -15,7 +15,7 @@ from why_this_chunk import (
     search_fixes,
 )
 from why_this_chunk.config import ALPHA_SWEEP, CHUNK_SIZE_SWEEP
-from why_this_chunk.counterfactual import AXIS_PRIORITY
+from why_this_chunk.counterfactual import AXIS_PRIORITY, _alpha_candidates
 from why_this_chunk.counterfactual import search_fixes as run_fixes
 from why_this_chunk.types import FixSuggestion
 
@@ -286,6 +286,22 @@ def test_alpha_axis_finds_fix_when_only_alpha_helps() -> None:
     assert "alpha" not in result.unevaluable
     # Either alpha or top_k surfaces it; the alpha axis was at least evaluated.
     assert result.all_fixes
+
+
+def test_off_grid_alpha_still_tries_the_nearest_sweep_point() -> None:
+    # 0.3 is nearest to 0.25, but 0.25 is not the current setting.
+    class _Alpha:
+        alpha = 0.3
+
+    tried = {cand.to_value for cand in _alpha_candidates(_Alpha(), RetrievalConfig(alpha=0.3))}
+    assert tried == set(ALPHA_SWEEP)
+
+    class _OnGrid:
+        alpha = 0.5
+
+    on_grid = {cand.to_value for cand in _alpha_candidates(_OnGrid(), RetrievalConfig(alpha=0.5))}
+    assert 0.5 not in on_grid
+    assert on_grid == set(ALPHA_SWEEP) - {0.5}
 
 
 def test_chunk_size_nearest_index_when_not_in_sweep() -> None:
